@@ -1,49 +1,37 @@
 from functools import partial
 
 import torch
-from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
-from transformers import T5EncoderModel, T5Tokenizer
 
 import src.quant as q
-from src.pipeline import OneDiffusionPipeline
-from src.models import NextDiT
+from src.models import OneDiffusionPipeline
 
 model_path = "./onediffusion/"
 
 with torch.inference_mode():
-    transformer = NextDiT.from_pretrained(
-        model_path, subfolder="transformer", torch_dtype=torch.bfloat16
-    )
-    print("transformer loaded")
-    vae = AutoencoderKL.from_pretrained(model_path, subfolder="vae")
-    text_encoder = T5EncoderModel.from_pretrained(
-        model_path, subfolder="text_encoder", torch_dtype=torch.bfloat16
-    )
-    print("text encoder loaded")
-    tokenizer = T5Tokenizer.from_pretrained(model_path, subfolder="tokenizer")
-    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        model_path, subfolder="scheduler"
+    pipeline = OneDiffusionPipeline.from_pretrained(
+        "./onediffusion/",
+        dtype={
+            "transformer": partial(q.qfloatx, 3, 2),  # fp6 (sign+3+2)
+            "text_encoder": torch.bfloat16,
+        },
+        device="cpu",
     )
 
-    pipeline = OneDiffusionPipeline(
-        transformer, vae, text_encoder, tokenizer, scheduler
-    )
-    pipeline.to(
-        "cuda",
-        # torch.bfloat16,
-        {
-            "transformer": partial(q.qfloatx, 3, 2),
-            "text_encoder": partial(q.qint8),
-        },
-    )
-    pipeline.offload = False
+    # print(
+    #     NextDiT.from_pretrained(
+    #         model_path, subfolder="transformer", torch_dtype=torch.bfloat16
+    #     ).x_embedder.weight.data.sum()
+    # )
+
+    pipeline.offload = True
+    pipeline.device = torch.device("cuda:0")
     # pipeline.to("cpu")
     torch.cuda.empty_cache()
 
-    from PIL import Image
+    # from PIL import Image
 
     print("gening")
-    pipeline.__call__(
+    images = pipeline(
         [
             "[[text2img]] a cat looking at the camera from afar with a spectacular sixteen foot long tophat looking extremely perplexed",
             (
@@ -58,3 +46,6 @@ with torch.inference_mode():
         size=(1024, 1024),
         cfg=4.5,
     )
+
+    for i, image in enumerate(images):
+        image.save(f"output_{i}.png")

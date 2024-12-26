@@ -1,0 +1,6 @@
+[submodule "torch-cublas-hgemm"]
+	path = torch-cublas-hgemm
+	url = https://github.com/aredden/torch-cublas-hgemm.git
+[submodule "torch-bnb-fp4"]
+	path = torch-bnb-fp4
+	url = https://github.com/aredden/torch-bnb-fp4.git

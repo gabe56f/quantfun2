@@ -1,4 +1,8 @@
 **/__pycache__
+
+# test files
 **.png
 **.jpg
+
+# this is my local weights folder
 onediffusion

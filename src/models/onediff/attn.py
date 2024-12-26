@@ -3,9 +3,9 @@ from typing import Literal
 import einops
 import torch
 from torch import nn
-from torch import functional as F
+from torch.nn import functional as F
 
-from ..misc.padding import pad_input, _upad_input
+from ...misc.padding import pad_input, _upad_input
 
 ATTN: Literal["sdpa", "flash", "sage"] = "sdpa"
 
