@@ -66,7 +66,7 @@ class OneDiffusionPipeline(Pipelinelike):
         cls,
         file_or_folder: Path,
         device: torch.device = "cpu",
-        quant_device: torch.device = "cuda",
+        quantization_device: torch.device = "cuda",
         dtype: Union[Datatype, Dict[str, Datatype]] = torch.bfloat16,
     ) -> "OneDiffusionPipeline":
         if not isinstance(file_or_folder, _Path):
@@ -111,7 +111,7 @@ class OneDiffusionPipeline(Pipelinelike):
                         transformer,
                         file,
                         device=device,
-                        quantization_device=quant_device,
+                        quantization_device=quantization_device,
                         torch_dtype=torch_dtype,
                         dtype=dtype,
                     )
