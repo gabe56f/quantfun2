@@ -7,6 +7,9 @@ git submodule update --recursive
 
 cd torch-cublas-hgemm
 # memory problems xd
-MAX_JOBS=1 pip install -U -v .
+MAX_JOBS=1 pip install -e .
 
 cd ..
+
+cd torch-bnb-fp4
+MAX_JOBS=1 pip install -e .

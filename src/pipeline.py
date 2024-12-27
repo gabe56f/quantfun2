@@ -1,11 +1,15 @@
-from typing import Protocol, Optional, Tuple, List, Union, Dict, TypeVar
+from typing import Protocol, Optional, Tuple, List, Union, Dict, TypeVar, TYPE_CHECKING
 import inspect
 from pathlib import Path as _Path
 
 import torch
 from PIL import Image
 
+from . import quant as q
 from .quant import qdtype, quantize_model, _nil
+
+if TYPE_CHECKING:
+    from gguf import GGUFReader
 
 
 Prompt = Union[str, Tuple[str, bool]]
@@ -15,6 +19,18 @@ Pseudorandom = Union[torch.Generator, int]
 Datatype = Union[torch.dtype, qdtype]
 Path = Union[str, _Path]
 T = TypeVar("T")
+
+_CONV_MAP = {
+    "F16": torch.bfloat16,
+    "F32": torch.float32,
+    "Q2": (q.qint4,),
+    "Q3": (q.qint4,),
+    "Q4": (q.qint4,),
+    "Q5": (q.qfloatx, 2, 2),
+    "Q6": (q.qfloatx, 3, 2),
+    "Q7": (q.qfloat8,),
+    "Q8": (q.qfloat8,),
+}
 
 
 class ImageSettings:
@@ -108,11 +124,83 @@ class Pipelinelike:
     ) -> torch.Tensor: ...
 
     @classmethod
+    def create_quantized_model_from_gguf(
+        cls,
+        meta_model: T,
+        gguf_file: Union[Path, "GGUFReader"],
+        device: torch.device = "cpu",
+        quantization_device: torch.device = "cuda",
+        torch_dtype: torch.dtype = torch.bfloat16,
+        dtype: qdtype = None,
+        override_dtype: bool = True,
+        replace_map: Optional[Dict[str, str]] = None,
+    ) -> T:
+        from gguf import GGUFReader
+
+        if not isinstance(gguf_file, GGUFReader):
+            gguf_file = GGUFReader(gguf_file)
+
+        if replace_map is None:
+            replace_map = {}
+
+        meta_model.to(dtype=torch_dtype)
+        dtype = dtype()
+
+        def repl(
+            model: torch.nn.Linear,
+            cur_fqn: str = "",
+        ):
+            _dtype = dtype
+            model.to_empty(device=device, recurse=False)
+
+            for k, param in model.named_parameters():
+                tensor_name = f"{cur_fqn}{k}"
+                # print(f"loading {tensor_name}")
+                for old, new in replace_map.items():
+                    tensor_name = tensor_name.replace(old, new)
+                try:
+                    # TODO: this is horribly bad, fix this
+                    tensor = [x for x in gguf_file.tensors if x.name == tensor_name][0]
+
+                    if override_dtype:
+                        base, *_ = tensor.tensor_type.name.split("_")
+                        base = base.replace("I", "")
+                        _dtype = _CONV_MAP.get(base, torch.bfloat16)
+
+                    data_tensor = torch.tensor(
+                        tensor.data, device=device, dtype=torch_dtype
+                    )
+
+                    param.module_load(data_tensor)
+                except:  # noqa
+                    print(f"failed to load {tensor_name}")
+                    pass
+
+            if _nil(model, cur_fqn[:-1]):
+                if isinstance(_dtype, torch.dtype):
+                    model = model.to(dtype=_dtype, device=device)
+                else:
+                    model = _dtype(
+                        model, device=device, quant_device=quantization_device
+                    )
+                return model
+            else:
+                for name, child in model.named_children():
+                    new_child = repl(child, f"{cur_fqn}{name}.")
+                    if new_child is not child:
+                        setattr(model, name, new_child)
+                return model
+
+        repl(meta_model, "")
+        return meta_model
+
+    @classmethod
     def create_quantized_model_from_safetensors(
         cls,
         meta_model: T,
         safetensors_file: Path,
         device: torch.device = "cpu",
+        quantization_device: torch.device = "cuda",
         torch_dtype: torch.dtype = torch.bfloat16,
         dtype: qdtype = None,
         replace_map: Optional[Dict[str, str]] = None,
@@ -146,7 +234,9 @@ class Pipelinelike:
                         pass
 
                 if _nil(model, cur_fqn[:-1]):
-                    model = dtype(model)
+                    model = dtype(
+                        model, device=device, quant_device=quantization_device
+                    )
                     return model
                 else:
                     for name, child in model.named_children():
@@ -243,6 +333,7 @@ class Pipelinelike:
         eta: float = 0.0,
         denoise_mask: List[int] = [1, 0],
         noise_scale: float = 1.0,
+        latents: torch.Tensor = None,
     ) -> Images: ...
 
     def prepare_extra_step_kwargs(self, **kwargs) -> Dict[str, any]:

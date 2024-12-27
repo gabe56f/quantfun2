@@ -66,6 +66,7 @@ class OneDiffusionPipeline(Pipelinelike):
         cls,
         file_or_folder: Path,
         device: torch.device = "cpu",
+        quant_device: torch.device = "cuda",
         dtype: Union[Datatype, Dict[str, Datatype]] = torch.bfloat16,
     ) -> "OneDiffusionPipeline":
         if not isinstance(file_or_folder, _Path):
@@ -107,7 +108,12 @@ class OneDiffusionPipeline(Pipelinelike):
                     dtype = datatype
 
                     transformer = cls.create_quantized_model_from_safetensors(
-                        transformer, file, device, torch_dtype, dtype
+                        transformer,
+                        file,
+                        device=device,
+                        quantization_device=quant_device,
+                        torch_dtype=torch_dtype,
+                        dtype=dtype,
                     )
             else:
                 raise ValueError("Only .safetensors are supported for now")
@@ -149,7 +155,7 @@ class OneDiffusionPipeline(Pipelinelike):
         prompts: Prompts,
         images_per_prompt: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor, bool, int]:
-        dt = torch.float32
+        dtype = torch.float32
 
         if isinstance(prompts, str):
             prompts = [prompts]
@@ -173,7 +179,7 @@ class OneDiffusionPipeline(Pipelinelike):
             text_input_ids.to(self.text_encoder.device),
             attention_mask=attention_mask.to(self.text_encoder.device),
         )
-        prompt_embeds = text_encoder_output[0].to(dt)
+        prompt_embeds = text_encoder_output[0].to(dtype)
 
         bs_embed, seq_len, _ = prompt_embeds.shape
         prompt_embeds = prompt_embeds.repeat(1, images_per_prompt, 1).view(
@@ -197,7 +203,7 @@ class OneDiffusionPipeline(Pipelinelike):
                     self.text_encoder.device
                 ),
             )
-            uncond_prompt_embeds = uncond_text_encoder_output[0].to(dt)
+            uncond_prompt_embeds = uncond_text_encoder_output[0].to(dtype)
             uncond_prompt_embeds = uncond_prompt_embeds.repeat(
                 1, images_per_prompt, 1
             ).view(bs_embed * images_per_prompt, seq_len, -1)
@@ -427,6 +433,7 @@ class OneDiffusionPipeline(Pipelinelike):
         eta: float = 0.0,
         denoise_mask: List[int] = [1, 0],
         noise_scale: float = 1.0,
+        latents: torch.Tensor = None,
     ) -> Images:
         if isinstance(seed, int):
             generator = torch.Generator(self.device)
@@ -456,6 +463,7 @@ class OneDiffusionPipeline(Pipelinelike):
             *size,
             generator=generator,
             image=processed_image,
+            latents=latents,
         )
         cond_latents: torch.Tensor = None
         denoise_indices: torch.Tensor = None

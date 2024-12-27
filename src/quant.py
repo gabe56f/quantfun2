@@ -5,14 +5,7 @@ import torch
 from torchao.dtypes.affine_quantized_tensor import (
     AffineQuantizedTensor,
 )
-
-# from torchao.dtypes import Layout, UintxLayout
-# from torchao.dtypes.floatx import FloatxTensorCoreLayout
 from torchao.quantization import quant_api as qa
-from torchao.quantization import quant_primitives as qp
-
-QUANTIZATION_DEVICE = torch.device("cuda:0")
-_MOVE_TO = None
 
 aten = torch.ops.aten
 
@@ -27,9 +20,13 @@ class qdtype:
 
 
 def patched_inserter(constructor, *, allow_requires_grad=False, **kwargs):
-    def insert_subclass(lin):
+    def insert_subclass(lin, device=None, quant_device=None):
         requires_grad = allow_requires_grad and lin.weight.requires_grad
-        tensor = constructor(lin.weight.to(QUANTIZATION_DEVICE), **kwargs).to(_MOVE_TO)
+        if device is None:
+            device = lin.weight.device
+        if quant_device is None:
+            quant_device = lin.weight.device
+        tensor = constructor(lin.weight.to(device=quant_device), **kwargs).to(device)
         lin.weight = torch.nn.Parameter(
             tensor,
             requires_grad=requires_grad,
@@ -40,10 +37,12 @@ def patched_inserter(constructor, *, allow_requires_grad=False, **kwargs):
     return insert_subclass
 
 
+# TODO: produces unstable tensors -> black images
+# look into this
 def cublas_linear_only():
     from cublas_ops import CublasLinear
 
-    def insert_cublas(lin: torch.nn.Linear):
+    def insert_cublas(lin: torch.nn.Linear, **_):
         linear = CublasLinear(
             lin.in_features,
             lin.out_features,
@@ -62,8 +61,13 @@ def cublas_linear_only():
 def bnb_int8_weight_only():
     from bitsandbytes.nn import Linear8bitLt
 
-    def insert_bnb(lin: torch.nn.Linear):
+    def insert_bnb(lin: torch.nn.Linear, device=None, quant_device=None):
         lin.to(torch.float16)
+        if device is None:
+            device = lin.weight.device
+        if quant_device is None:
+            quant_device = "cuda:0"
+
         linear = Linear8bitLt(
             lin.in_features,
             lin.out_features,
@@ -73,8 +77,10 @@ def bnb_int8_weight_only():
         linear.weight.data = lin.weight.clone().detach()
         if lin.bias is not None:
             linear.bias.data = lin.bias.clone().detach()
-        linear.to(QUANTIZATION_DEVICE)
-        linear.to(_MOVE_TO)
+
+        # quantize
+        linear = linear.to(device=quant_device)
+        linear = linear.to(device)
         return linear
 
     return insert_bnb
@@ -86,8 +92,13 @@ def bnb_int4_weight_only():
     # TODO: check for this
     from torch_bnb_fp4 import TorchFP4Linear
 
-    def insert_bnb(lin: torch.nn.Linear):
+    def insert_bnb(lin: torch.nn.Linear, device=None, quant_device=None):
         lin.to(torch.float16)
+        if device is None:
+            device = lin.weight.device
+        if quant_device is None:
+            quant_device = "cuda:0"
+
         linear = LinearFP4(
             lin.in_features,
             lin.out_features,
@@ -97,11 +108,14 @@ def bnb_int4_weight_only():
         linear.weight.data = lin.weight.clone().detach()
         if lin.bias is not None:
             linear.bias.data = lin.bias.clone().detach()
-        linear.to(QUANTIZATION_DEVICE)
+        linear = linear.to(device=quant_device)
 
         linear = TorchFP4Linear.from_linear(linear, use_codebook_dequant=True)
+        # fix t5 issue
         linear.weight = None
-        linear.to(_MOVE_TO)
+
+        # quantize
+        linear = linear.to(device)
         return linear
 
     return insert_bnb
@@ -110,8 +124,13 @@ def bnb_int4_weight_only():
 def bnb_nf4_weight_only():
     from bitsandbytes.nn import LinearNF4
 
-    def insert_bnb(lin: torch.nn.Linear):
+    def insert_bnb(lin: torch.nn.Linear, device=None, quant_device=None):
         lin.to(torch.float16)
+        if device is None:
+            device = lin.weight.device
+        if quant_device is None:
+            quant_device = "cuda:0"
+
         linear = LinearNF4(
             lin.in_features,
             lin.out_features,
@@ -121,8 +140,10 @@ def bnb_nf4_weight_only():
         linear.weight.data = lin.weight.clone().detach()
         if lin.bias is not None:
             linear.bias.data = lin.bias.clone().detach()
-        linear.to(QUANTIZATION_DEVICE)
-        linear.to(_MOVE_TO)
+
+        # quantize
+        linear = linear.to(device=quant_device)
+        linear = linear.to(device)
         return linear
 
     return insert_bnb
@@ -136,12 +157,17 @@ def _(f, types, *args, **kwargs):
     return False
 
 
-qintx = qdtype("intx_", qa.uintx_weight_only)
 qint4 = qdtype("int4", qa.int4_weight_only)
 qint8 = qdtype("int8", qa.int8_weight_only)
-qfloatx = qdtype("floatx_", qa.fpx_weight_only)
 qfloat8 = qdtype("float8", qa.float8_weight_only)
+
+qfloatx = qdtype("floatx_", qa.fpx_weight_only)
+qintx = qdtype("intx_", qa.uintx_weight_only)
+
+# cublas
 qfloat16 = qdtype("float16", cublas_linear_only)
+
+# bnb
 qbint8 = qdtype("bint8", bnb_int8_weight_only)
 qfloat4 = qdtype("float4", bnb_int4_weight_only)
 qnfloat4 = qdtype("nf4", bnb_nf4_weight_only)
@@ -157,37 +183,39 @@ def _replace_with_custom_fn_if_matches_filter(
     filter_fn,
     cur_fqn: str = "",
     device=None,
+    quant_device=None,
 ) -> None:
     if filter_fn(model, cur_fqn[:-1]):
-        # if device is not None:
-        #     model.to(device=device)  # move to device before quantization
         if isinstance(replacement_map, dict):
-            model = replacement_map[cur_fqn](model)
+            model = replacement_map[cur_fqn](
+                model, device=device, quant_device=quant_device
+            )
         else:
-            model = replacement_map(model)
+            model = replacement_map(model, device=device, quant_device=quant_device)
         return model
     else:
         for name, child in model.named_children():
             new_child = _replace_with_custom_fn_if_matches_filter(
-                child, replacement_map, filter_fn, f"{cur_fqn}{name}.", device
+                child,
+                replacement_map,
+                filter_fn,
+                f"{cur_fqn}{name}.",
+                device,
+                quant_device,
             )
             if new_child is not child:
                 setattr(model, name, new_child)
-        # if device is not None:
-        #     model.to(device=device)  # move parent module to device
         return model
 
 
 def quantize_model(
     model,
-    # initialize,
     dtype_map,
     device: torch.device = "cuda",
+    quantization_device: torch.device = "cuda",
     skip=_nil,
 ) -> torch.nn.Module:
-    # model = initialize()
-
-    global _MOVE_TO
-    _MOVE_TO = device
-    _replace_with_custom_fn_if_matches_filter(model, dtype_map, skip, device=device)
+    _replace_with_custom_fn_if_matches_filter(
+        model, dtype_map, skip, device=device, quant_device=quantization_device
+    )
     return model
