@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import types
 
 import torch
@@ -14,8 +14,19 @@ aten = torch.ops.aten
 class qdtype:
     display: str
     apply_function: any
+    args: list = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        if "x" in self.display:
+            display = self.display
+            for arg in self.args:
+                display = display.replace("x", str(arg), 1)
+            display = display.replace("_", "")
+            return display
+        return self.display
 
     def __call__(self, *args, **kwargs) -> any:
+        self.args = args
         return self.apply_function(*args, **kwargs)
 
 
@@ -40,20 +51,26 @@ def patched_inserter(constructor, *, allow_requires_grad=False, **kwargs):
 # TODO: produces unstable tensors -> black images
 # look into this
 def cublas_linear_only():
-    from cublas_ops import CublasLinear
+    try:
+        from cublas_ops import CublasLinear
 
-    def insert_cublas(lin: torch.nn.Linear, **_):
-        linear = CublasLinear(
-            lin.in_features,
-            lin.out_features,
-            lin.bias is not None,
-            dtype=lin.weight.dtype,
-            device=lin.weight.device,
-        )
-        linear.weight.data = lin.weight.clone().detach()
-        if lin.bias is not None:
-            linear.bias.data = lin.bias.clone().detach()
-        return linear
+        def insert_cublas(lin: torch.nn.Linear, **_):
+            linear = CublasLinear(
+                lin.in_features,
+                lin.out_features,
+                lin.bias is not None,
+                dtype=lin.weight.dtype,
+                device=lin.weight.device,
+            )
+            linear.weight.data = lin.weight.clone().detach()
+            if lin.bias is not None:
+                linear.bias.data = lin.bias.clone().detach()
+            return linear
+
+    except ImportError:
+
+        def insert_cublas(lin: torch.nn.Linear, **_):
+            return lin
 
     return insert_cublas
 
@@ -89,8 +106,10 @@ def bnb_int8_weight_only():
 def bnb_int4_weight_only():
     from bitsandbytes.nn import LinearFP4
 
-    # TODO: check for this
-    from torch_bnb_fp4 import TorchFP4Linear
+    try:
+        from torch_bnb_fp4 import TorchFP4Linear
+    except ImportError:
+        TorchFP4Linear = None
 
     def insert_bnb(lin: torch.nn.Linear, device=None, quant_device=None):
         lin.to(torch.float16)
@@ -110,12 +129,13 @@ def bnb_int4_weight_only():
             linear.bias.data = lin.bias.clone().detach()
         linear = linear.to(device=quant_device)
 
-        linear = TorchFP4Linear.from_linear(linear, use_codebook_dequant=True)
-        # fix t5 issue
-        linear.weight = None
+        if TorchFP4Linear is not None:
+            linear = TorchFP4Linear.from_linear(linear, use_codebook_dequant=True)
+            # fix t5 issue
+            linear.weight = None
 
-        # quantize
-        linear = linear.to(device)
+            # quantize
+            linear = linear.to(device)
         return linear
 
     return insert_bnb

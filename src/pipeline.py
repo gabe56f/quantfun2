@@ -71,6 +71,18 @@ class ImageSettings:
 DEFAULT_SETTINGS = ImageSettings()
 
 
+class Guidance(Protocol):
+    def setup(self, steps: int, scale: float, disable: bool = False) -> "Guidance": ...
+
+    def __call__(
+        self,
+        x0: torch.Tensor,
+        conds: torch.Tensor,
+        timestep: torch.LongTensor,
+        step: int,
+    ) -> torch.Tensor: ...
+
+
 class Schedulerlike(Protocol):
     timesteps: torch.Tensor
     init_noise_sigma: torch.Tensor
@@ -87,13 +99,73 @@ class Schedulerlike(Protocol):
 
 class Pipelinelike:
     def __init__(self) -> None:
+        from .misc.guidance import CFG
+
         super().__setattr__("models", {})
+        super().__setattr__("scheduler", None)
+        super().__setattr__("can_mu", True)
         super().__setattr__("device", torch.device("cpu"))
         super().__setattr__("dtype", torch.bfloat16)
         super().__setattr__("offload", False)
+        super().__setattr__("cfg", CFG())
 
     def __setattr__(self, __name: str, __value) -> None:
-        skip_models = ["models", "device", "dtype", "offload"]
+        skip_models = [
+            "models",
+            "device",
+            "dtype",
+            "offload",
+            "cfg",
+            "scheduler",
+            "can_mu",
+        ]
+        if __name == "cfg":
+            if isinstance(__value, str):
+                from .misc.guidance import CFG, APG, MimicCFG
+
+                value = __value.lower()
+                if value == "disable":
+                    self.cfg.disable = True
+                elif value == "enable":
+                    self.cfg.disable = False
+                elif value == "cfg":
+                    super().__setattr__("cfg", CFG())
+                elif value == "apg":
+                    super().__setattr__("cfg", APG())
+                elif value == "mimic":
+                    super().__setattr__("cfg", MimicCFG())
+                else:
+                    raise ValueError(f"Invalid value for cfg: {__value}")
+            else:
+                super().__setattr__("cfg", __value)
+            return
+        elif __name == "scheduler":
+            if isinstance(__value, str):
+                value = __value.lower()
+                val = None
+                if value == "euler":
+                    from diffusers import FlowMatchEulerDiscreteScheduler
+
+                    val = FlowMatchEulerDiscreteScheduler(
+                        shift=3.0, use_dynamic_shifting=True
+                    )
+                elif value == "heun":
+                    from diffusers import FlowMatchHeunDiscreteScheduler
+
+                    val = FlowMatchHeunDiscreteScheduler(shift=3.0)
+                elif value == "sasolver":
+                    from diffusers import SASolverScheduler
+
+                    val = SASolverScheduler()
+                super().__setattr__("scheduler", val)
+            else:
+                super().__setattr__("scheduler", __value)
+            super().__setattr__(
+                "can_mu",
+                "mu"
+                in inspect.signature(self.scheduler.set_timesteps).parameters.keys(),
+            )
+            return
         if __name not in skip_models and hasattr(__value, "to"):
             self.models[__name] = __value
         super().__setattr__(__name, __value)
@@ -124,6 +196,7 @@ class Pipelinelike:
     ) -> torch.Tensor: ...
 
     @classmethod
+    @torch.no_grad()
     def create_quantized_model_from_gguf(
         cls,
         meta_model: T,
@@ -195,6 +268,7 @@ class Pipelinelike:
         return meta_model
 
     @classmethod
+    @torch.no_grad()
     def create_quantized_model_from_safetensors(
         cls,
         meta_model: T,
@@ -387,6 +461,11 @@ def retrieve_timesteps(
     device: Optional[torch.device] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, int]:
-    scheduler.set_timesteps(num_inference_steps, device, **kwargs)
+    extra_kwargs = {}
+    for k, v in kwargs.items():
+        if k in set(inspect.signature(scheduler.set_timesteps).parameters.keys()):
+            extra_kwargs[k] = v
+
+    scheduler.set_timesteps(num_inference_steps, device, **extra_kwargs)
 
     return scheduler.timesteps, num_inference_steps

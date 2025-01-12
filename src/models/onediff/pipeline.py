@@ -455,6 +455,8 @@ class OneDiffusionPipeline(Pipelinelike):
             prompts, images_per_prompt
         )
 
+        self.cfg.setup(steps, cfg, not do_cfg)
+
         processed_image = self.encode_image(image, image_settings, *size)
 
         latents = self.prepare_latents(
@@ -497,16 +499,21 @@ class OneDiffusionPipeline(Pipelinelike):
                 / self.transformer.config.patch_size[-2]
             )
         sigmas = np.linspace(1.0, 1 / steps, steps)
-        mu = calculate_shift(
-            image_seq_len,
-            self.scheduler.config.base_image_seq_len,
-            self.scheduler.config.max_image_seq_len,
-            self.scheduler.config.base_shift,
-            self.scheduler.config.max_shift,
-        )
-        timesteps, steps = retrieve_timesteps(
-            self.scheduler, steps, self.device, sigmas=sigmas, mu=mu
-        )
+        if self.can_mu:
+            mu = calculate_shift(
+                image_seq_len,
+                self.scheduler.config.base_image_seq_len,
+                self.scheduler.config.max_image_seq_len,
+                self.scheduler.config.base_shift,
+                self.scheduler.config.max_shift,
+            )
+            timesteps, steps = retrieve_timesteps(
+                self.scheduler, steps, self.device, sigmas=sigmas, mu=mu
+            )
+        else:
+            timesteps, steps = retrieve_timesteps(
+                self.scheduler, steps, self.device, sigmas=sigmas
+            )
 
         if image_settings.multiview:
             cond_indices_images, cond_indices_rays, cond_rays = (
@@ -559,11 +566,7 @@ class OneDiffusionPipeline(Pipelinelike):
                 encoder_attention_mask=encoder_attention_mask,
             )
 
-            if do_cfg:
-                noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + cfg * (
-                    noise_pred_cond - noise_pred_uncond
-                )
+            noise_pred = self.cfg(latent_model_input, noise_pred, t, i)
 
             if cond_latents is None and not image_settings.multiview:
                 latents = self.scheduler.step(
