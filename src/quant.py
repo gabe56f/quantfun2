@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from functools import partial
 import types
 
 import torch
@@ -46,6 +47,87 @@ def patched_inserter(constructor, *, allow_requires_grad=False, **kwargs):
         return lin
 
     return insert_subclass
+
+
+def flute_linear_only(
+    group_size: int = 64, lql: bool = False, num_bits: int = 4, fake: bool = False
+):
+    try:
+        from flute.integrations.base import FluteLinear
+        from flute.integrations.learnable import LearnableQuantizedLinear
+        from flute.nf_utils import nf_quantize_2, nf_quantize
+        from flute.utils import make_qmap2_from_qmap
+
+        try:
+            from flute.tune import tune_and_pack
+        except ImportError:
+            return lambda x, **_: x
+
+        def insert_flute(lin: torch.nn.Linear, device=None, quant_device=None):
+            lin.to(torch.bfloat16)
+            if fake:
+                new_weight = nf_quantize_2(
+                    W=lin.weight.to(device=quant_device),
+                    num_bits=num_bits,
+                    group_size=group_size,
+                    dtype=lin.weight.dtype,
+                )
+                lin.weight = torch.nn.Parameter(
+                    new_weight.to(device=quant_device), requires_grad=False
+                )
+            else:
+                flute_dtype = lin.weight.dtype
+                if lql:
+                    return lin
+                _, _Q, scales, qmap = nf_quantize(
+                    W=lin.weight.to(device=quant_device),
+                    num_bits=num_bits,
+                    group_size=group_size,
+                    # dtype=flute_dtype,
+                )
+
+                if not (_Q.to(dtype=torch.uint8) == _Q).all():
+                    raise ValueError("Q should be uint8")
+
+                example_inputs = torch.randn(
+                    1, lin.in_features, dtype=flute_dtype, device=quant_device
+                )
+                Q, tune_metadata = tune_and_pack(
+                    inputs=example_inputs,
+                    weight=_Q.to(dtype=torch.uint8).T.contiguous(),
+                    num_bits=num_bits,
+                    group_size=group_size,
+                )
+
+                new_lin = FluteLinear(
+                    lin.in_features,
+                    lin.out_features,
+                    num_bits=num_bits,
+                    group_size=group_size,
+                    template_id=tune_metadata.template_id,
+                    workspace_lazy_init=False,
+                    bias=lin.bias is not None,
+                    device=quant_device,
+                    dtype=flute_dtype,
+                )
+                scales = scales.view(new_lin.scales.shape)
+                scales = scales.to(dtype=new_lin.scales.dtype)
+                qmap = qmap.to(dtype=new_lin.tables.dtype)
+                qmap2 = make_qmap2_from_qmap(qmap)
+
+                new_lin.weight.copy_(Q)
+                new_lin.scales.copy_(scales)
+                new_lin.tables.copy_(qmap)
+                new_lin.tables2.copy_(qmap2)
+                if new_lin.bias is not None:
+                    new_lin.bias.copy_(lin.bias)
+
+                return new_lin
+
+        return insert_flute
+
+    except ImportError:
+        return lambda x, **_: x
 
 
 # TODO: produces unstable tensors -> black images
@@ -191,6 +273,10 @@ qfloat16 = qdtype("float16", cublas_linear_only)
 qbint8 = qdtype("bint8", bnb_int8_weight_only)
 qfloat4 = qdtype("float4", bnb_int4_weight_only)
 qnfloat4 = qdtype("nf4", bnb_nf4_weight_only)
+
+qflute4 = qdtype("qflute4", partial(flute_linear_only, num_bits=4))
+qflute3 = qdtype("qflute3", partial(flute_linear_only, num_bits=3))
+qflute2 = qdtype("qflute2", partial(flute_linear_only, num_bits=2))
 
 
 def _nil(module: torch.nn.Module, fqn: str):

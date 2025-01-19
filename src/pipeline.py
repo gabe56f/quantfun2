@@ -71,6 +71,68 @@ class ImageSettings:
 DEFAULT_SETTINGS = ImageSettings()
 
 
+class Postprocessors:
+    def __init__(self) -> None:
+        super().__setattr__("postprocessors", {})
+
+    def __iadd__(self, other) -> "Postprocessors":
+        update = {}
+        if isinstance(other, dict):
+            update = other
+        elif isinstance(other, str):
+            value = other.lower()
+            if "pixelize" in value:
+                from .misc.postprocessors import PixelOE
+
+                poe = PixelOE()
+                if "-" in value:
+                    try:
+                        mode, *others = value.replace("pixelize-", "").split("@")
+                        poe.mode = mode
+                        if len(others) == 3:
+                            poe.target_size, poe.patch_size, poe.thickness = map(
+                                int, others
+                            )
+                        elif len(others) == 2:
+                            poe.target_size, poe.patch_size = map(int, others)
+                        else:
+                            poe.target_size = int(others[0])
+                    except:  # noqa
+                        pass
+
+                update = {"pixelize": poe}
+        self.postprocessors.update(update)
+        return self
+
+    def __isub__(self, other) -> "Postprocessors":
+        if isinstance(other, str):
+            self.postprocessors.pop(other, None)
+        return self
+
+    def setup(self, pipeline: "Pipelinelike") -> "Postprocessors":
+        for _, postprocessor in self.postprocessors.items():
+            postprocessor.setup(pipeline)
+        return self
+
+    def __call__(self, images: Images, width: int, height: int) -> Images:
+        for _, postprocessor in self.postprocessors.items():
+            images = postprocessor(images, width, height)
+        return images
+
+    def __del__(self) -> None:
+        self.postprocessors.clear()
+
+    def __getattr__(self, __name: str) -> "Postprocessor":
+        if __name == "postprocessors":
+            return super().__getattribute__("postprocessors")
+        return super().__getattribute__("postprocessors").get(__name, None)
+
+
+class Postprocessor(Protocol):
+    def setup(self, pipeline: "Pipelinelike") -> "Postprocessor": ...
+    def __call__(self, images: Images, width: int, height: int) -> Images: ...
+
+
 class Guidance(Protocol):
     def setup(self, steps: int, scale: float, disable: bool = False) -> "Guidance": ...
 
@@ -108,16 +170,13 @@ class Pipelinelike:
         super().__setattr__("dtype", torch.bfloat16)
         super().__setattr__("offload", False)
         super().__setattr__("cfg", CFG())
+        super().__setattr__("postprocessors", Postprocessors())
 
     def __setattr__(self, __name: str, __value) -> None:
         skip_models = [
             "models",
             "device",
             "dtype",
-            "offload",
-            "cfg",
-            "scheduler",
-            "can_mu",
         ]
         if __name == "cfg":
             if isinstance(__value, str):
@@ -321,6 +380,41 @@ class Pipelinelike:
 
             repl(meta_model, "")
         return meta_model
+
+    def compile(
+        self,
+        fullgraph: bool = False,
+        dynamic: bool = False,
+        backend: str = "inductor",
+        mode: str = "max-autotune",
+        options: dict = None,
+        device: torch.device = "cuda:0",
+    ) -> None:
+        if self.offload:
+            print("Offload and compile not supported, disabling offload")
+            self.offload = False
+            self.device = device
+
+        self.to(device)
+
+        for name, model in self.models.items():
+            from diffusers import AutoencoderKL
+
+            if isinstance(model, (AutoencoderKL)):
+                continue
+
+            setattr(
+                self,
+                name,
+                torch.compile(
+                    model,
+                    fullgraph=fullgraph,
+                    dynamic=dynamic,
+                    backend=backend,
+                    mode=mode,
+                    options=options,
+                ),
+            )
 
     def to(
         self,

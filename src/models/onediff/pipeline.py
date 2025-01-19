@@ -46,12 +46,6 @@ class OneDiffusionPipeline(Pipelinelike):
         self.tokenizer = tokenizer
         self.scheduler = scheduler
 
-        self.models = {
-            "transformer": self.transformer,
-            "vae": self.vae,
-            "text_encoder": self.text_encoder,
-        }
-
         self.offload = False
         self.device = torch.device("cuda:0")
         self.dtype = torch.bfloat16
@@ -145,7 +139,9 @@ class OneDiffusionPipeline(Pipelinelike):
                 dtype=torch_dtype
             )
 
-            return cls(transformer, vae, text_encoder, tokenizer, scheduler)
+            ret = cls(transformer, vae, text_encoder, tokenizer, scheduler)
+            ret.to(device=device)
+            return ret
         else:
             raise ValueError("Single file loading not implemented for OneDiffusion")
 
@@ -456,6 +452,7 @@ class OneDiffusionPipeline(Pipelinelike):
         )
 
         self.cfg.setup(steps, cfg, not do_cfg)
+        self.postprocessors.setup(self)
 
         processed_image = self.encode_image(image, image_settings, *size)
 
@@ -603,4 +600,5 @@ class OneDiffusionPipeline(Pipelinelike):
                 latents = einops.rearrange(latents, "b f c h w -> (b f) c h w")
 
         images = self.decode_image(latents, *size)
+        images = self.postprocessors(images, *size)
         return images

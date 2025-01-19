@@ -121,6 +121,26 @@ class Attention(nn.Module):
             self.k_norm = nn.Identity()
             self.ky_norm = nn.Identity()
 
+    # @staticmethod
+    # def apply_rotary_embedding(
+    #     xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
+    # ) -> tuple[torch.Tensor, torch.Tensor]:
+    #     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 2)
+    #     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 2)
+
+    #     freqs_cis = freqs_cis.unsqueeze(2)
+
+    #     xq_out_real = xq_[..., 0] * freqs_cis[..., 0] - xq_[..., 1] * freqs_cis[..., 1]
+    #     xq_out_imag = xq_[..., 0] * freqs_cis[..., 1] + xq_[..., 1] * freqs_cis[..., 0]
+
+    #     xk_out_real = xk_[..., 0] * freqs_cis[..., 0] - xk_[..., 1] * freqs_cis[..., 1]
+    #     xk_out_imag = xk_[..., 0] * freqs_cis[..., 1] + xk_[..., 1] * freqs_cis[..., 0]
+
+    #     xq_out = torch.stack((xq_out_real, xq_out_imag), dim=-1).flatten(-2)
+    #     xk_out = torch.stack((xk_out_real, xk_out_imag), dim=-1).flatten(-2)
+
+    #     return xq_out.type_as(xq), xk_out.type_as(xk)
+
     @staticmethod
     def apply_rotary_embedding(
         xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
