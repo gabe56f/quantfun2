@@ -6,7 +6,7 @@ import src.quant as q
 from src.models import OneDiffusionPipeline
 from src.models.lumina.image_two.pipeline import LuminaImageTwoPipeline
 
-model_path = "../lumina-image-2.0-bf16-diffusers/"
+model_path = "./lumina-image-2.0-bf16-diffusers/"
 
 with torch.inference_mode():
     if True:
