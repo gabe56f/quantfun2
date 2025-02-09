@@ -3,19 +3,35 @@ import triton
 import triton.language as tl
 
 
+def get_configs():
+    configs = []
+    for k in range(6, 11):
+        for warp in [1, 2, 4]:
+            configs.append(
+                triton.Config(
+                    {
+                        "BLOCK_SIZE": 2**k,
+                    },
+                    num_warps=warp,
+                )
+            )
+    return configs
+
+
+@triton.autotune(configs=get_configs(), key=["N"])
 @triton.jit
 def rms_norm_kernel(
     x_ptr,
     weight_ptr,
     output_ptr,
-    M,
-    N,
-    eps,
     stride_x_row,
     stride_x_col,
     stride_weight_col,
     stride_output_row,
     stride_output_col,
+    eps: tl.constexpr,
+    M: tl.constexpr,
+    N: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     row_idx = tl.program_id(0)
@@ -61,20 +77,18 @@ def apply_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
 
     weight_1d = weight.contiguous().view(-1)
 
-    BLOCK_SIZE = 1024
     grid = (M,)
     rms_norm_kernel[grid](
         x_2d,
         weight_1d,
         output.view(-1, dim),
-        M,
-        N,
-        eps,
         x_2d.stride(0),
         x_2d.stride(1),
         weight_1d.stride(0),
         output.view(-1, dim).stride(0),
         output.view(-1, dim).stride(1),
-        BLOCK_SIZE=BLOCK_SIZE,
+        eps=eps,
+        M=M,
+        N=N,
     )
     return output

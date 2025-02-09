@@ -34,7 +34,7 @@ def apply_merged_rotary_embedding(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-ATTN: Literal["sdpa", "flash", "sage"] = "flash"
+ATTN: Literal["sdpa", "flash", "sage"] = "sage"
 
 
 # TODO: bring out to helper class

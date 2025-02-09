@@ -32,21 +32,26 @@ with torch.inference_mode():
     pipeline.device = torch.device("cuda:0")
     torch.cuda.empty_cache()
     # pipeline.to("cuda:0")
-    # pipeline.compile()
 
     # from PIL import Image
 
     # pipeline.scheduler = "heun"
 
-    pipeline.postprocessors += "pixelize-contrast@128@8@4"
+    # pipeline.postprocessors += "pixelize-contrast@128@8@4"
 
     def prompt(n: str) -> str:
         return f"You are an assistant designed to generate superior images with the superior degree of image-text alignment based on textual prompts or user prompts. <Prompt Start> {n}"
+
+    # import torch.autograd.profiler as profiler
 
     def generate(n: str, cfg: str, scale: float = 4.5, seed=1337):
         pipeline.cfg = cfg
 
         print("gening")
+        # with profiler.profile(
+        #     use_device="cuda",
+        #     with_stack=True,
+        # ) as prof:
         images = pipeline(
             [
                 # "[[image_editing]] make the man be in a suit and tie with a top hat and a monocle",
@@ -62,11 +67,13 @@ with torch.inference_mode():
             ],
             images_per_prompt=1,
             seed=seed,
-            steps=12,
+            steps=50,
             # image=Image.open("kopp.png"),
             size=(1024, 1024),
             cfg=scale,
         )
+
+        # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=100))
 
         for i, image in enumerate(images):
             image.save(f"output_{n}_{i}_{cfg}.png")
@@ -84,5 +91,7 @@ with torch.inference_mode():
 
     # del pipeline.postprocessors
 
-    for i in range(1, 6):
+    # pipeline.compile()
+
+    for i in range(1, 11):
         generate(f"retardation_{i}", "cfg", 4, i)

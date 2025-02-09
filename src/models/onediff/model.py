@@ -11,8 +11,6 @@ from .utils import modulate
 
 if has_triton():
     from ...kernels.rmsnorm import apply_rmsnorm
-
-    # from ...kernels.ffn import ffn_forward
 else:
 
     def apply_rmsnorm(
@@ -24,17 +22,6 @@ else:
 
         output = _norm(x.float()).type_as(x)
         return output * weight
-
-
-def ffn_forward(
-    x: torch.Tensor,
-    dim: int,
-    hidden_dim: int,
-    w1: torch.nn.Linear,
-    w2: torch.nn.Linear,
-    w3: torch.nn.Linear,
-) -> torch.Tensor:
-    return w2(F.silu(w1(x)) * w3(x))
 
 
 class TimestepEmbedder(nn.Module):
@@ -56,7 +43,9 @@ class TimestepEmbedder(nn.Module):
     ) -> torch.Tensor:
         half = dim // 2
         frequencies = torch.exp(
-            -np.log(max_period) * torch.arange(0, half, dtype=t.dtype) / half
+            -torch.log(torch.tensor(max_period, dtype=t.dtype, device=t.device))
+            * torch.arange(0, half, dtype=t.dtype)
+            / half
         ).to(t.device)
         args = t[:, :, None] * frequencies[None, :]
         embeddings = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
@@ -145,8 +134,10 @@ class LlamaFeedForward(nn.Module):
         self.w2 = nn.Linear(hidden_dim_calculated, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim_calculated, bias=False)
 
+        self.silu = nn.SiLU()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return ffn_forward(x, self.dim, self.hidden_dim, self.w1, self.w2, self.w3)
+        return self.w2(self.silu(self.w1(x)) * self.w3(x))
 
 
 class TransformerBlock(nn.Module):
