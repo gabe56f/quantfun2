@@ -177,6 +177,7 @@ class Pipelinelike:
             "models",
             "device",
             "dtype",
+            "postprocessors",
         ]
         if __name == "cfg":
             if isinstance(__value, str):

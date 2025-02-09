@@ -17,7 +17,7 @@ with torch.inference_mode():
         model_path,
         dtype={
             "transformer": torch.bfloat16,  # partial(q.qfloatx, 3, 2),  # fp6 (sign+3+2)
-            "text_encoder": torch.bfloat16,
+            "text_encoder": partial(q.qint8),  # int4
         },
         device="cpu",
     )
@@ -38,7 +38,7 @@ with torch.inference_mode():
 
     # pipeline.scheduler = "heun"
 
-    # pipeline.postprocessors += "pixelize-contrast@128@8@4"
+    pipeline.postprocessors += "pixelize-contrast@128@8@4"
 
     def prompt(n: str) -> str:
         return f"You are an assistant designed to generate superior images with the superior degree of image-text alignment based on textual prompts or user prompts. <Prompt Start> {n}"
@@ -51,7 +51,7 @@ with torch.inference_mode():
             [
                 # "[[image_editing]] make the man be in a suit and tie with a top hat and a monocle",
                 prompt(
-                    "a cat looking at the camera from afar with a spectacular sixteen foot long tophat looking extremely perplexed"
+                    "an anime girl with long white hair and heterochromia in an apron inside a kitchen. Make sure it's anime style all the way thru"
                 ),
                 (
                     prompt(

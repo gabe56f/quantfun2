@@ -132,7 +132,12 @@ class LuminaImageTwoPipeline(Pipelinelike):
                 dtype = datatype
 
                 text_encoder.to(dtype=torch_dtype)
-                text_encoder = quantize_model(text_encoder, dtype, device=device)
+                text_encoder = quantize_model(
+                    text_encoder,
+                    dtype,
+                    device=device,
+                    quantization_device=quantization_device,
+                )
             tokenizer = GemmaTokenizer.from_pretrained(file_or_folder / "tokenizer")
             scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 file_or_folder / "scheduler"

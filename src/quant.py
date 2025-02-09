@@ -293,12 +293,12 @@ def _replace_with_custom_fn_if_matches_filter(
 ) -> None:
     if filter_fn(model, cur_fqn[:-1]):
         if isinstance(replacement_map, dict):
-            model = replacement_map[cur_fqn](
+            model = replacement_map[cur_fqn]()(
                 model, device=device, quant_device=quant_device
             )
         else:
-            model = replacement_map(model, device=device, quant_device=quant_device)
-        return model
+            model = replacement_map()(model, device=device, quant_device=quant_device)
+        return model.to(device=device)
     else:
         for name, child in model.named_children():
             new_child = _replace_with_custom_fn_if_matches_filter(
