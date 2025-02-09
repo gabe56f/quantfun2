@@ -4,14 +4,19 @@ import torch
 
 import src.quant as q
 from src.models import OneDiffusionPipeline
+from src.models.lumina.image_two.pipeline import LuminaImageTwoPipeline
 
-model_path = "./onediffusion/"
+model_path = "../lumina-image-2.0-bf16-diffusers/"
 
 with torch.inference_mode():
-    pipeline = OneDiffusionPipeline.from_pretrained(
-        "./onediffusion/",
+    if True:
+        pipeclass = LuminaImageTwoPipeline
+    else:
+        pipeclass = OneDiffusionPipeline
+    pipeline = pipeclass.from_pretrained(
+        model_path,
         dtype={
-            "transformer": partial(q.qflute4, 64),  # fp6 (sign+3+2)
+            "transformer": torch.bfloat16,  # partial(q.qfloatx, 3, 2),  # fp6 (sign+3+2)
             "text_encoder": torch.bfloat16,
         },
         device="cpu",
@@ -23,8 +28,8 @@ with torch.inference_mode():
     #     ).x_embedder.weight.data.sum()
     # )
 
-    # pipeline.offload = True
-    # pipeline.device = torch.device("cuda:0")
+    pipeline.offload = True
+    pipeline.device = torch.device("cuda:0")
     torch.cuda.empty_cache()
     # pipeline.to("cuda:0")
     # pipeline.compile()
@@ -33,7 +38,10 @@ with torch.inference_mode():
 
     # pipeline.scheduler = "heun"
 
-    pipeline.postprocessors += "pixelize-contrast@128@8@4"
+    # pipeline.postprocessors += "pixelize-contrast@128@8@4"
+
+    def prompt(n: str) -> str:
+        return f"You are an assistant designed to generate superior images with the superior degree of image-text alignment based on textual prompts or user prompts. <Prompt Start> {n}"
 
     def generate(n: str, cfg: str, scale: float = 4.5, seed=1337):
         pipeline.cfg = cfg
@@ -42,15 +50,19 @@ with torch.inference_mode():
         images = pipeline(
             [
                 # "[[image_editing]] make the man be in a suit and tie with a top hat and a monocle",
-                "[[text2img]] a cat looking at the camera from afar with a spectacular sixteen foot long tophat looking extremely perplexed",
+                prompt(
+                    "a cat looking at the camera from afar with a spectacular sixteen foot long tophat looking extremely perplexed"
+                ),
                 (
-                    "monochrome, greyscale, low-res, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name, poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation",
+                    prompt(
+                        "monochrome, greyscale, low-res, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry, artist name, poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation"
+                    ),
                     True,
                 ),
             ],
             images_per_prompt=1,
             seed=seed,
-            steps=32,
+            steps=12,
             # image=Image.open("kopp.png"),
             size=(1024, 1024),
             cfg=scale,
@@ -68,9 +80,9 @@ with torch.inference_mode():
     # for i in range(1337, 1340):
     #     generate(f"c{i}", "mimic", 16, i)
 
-    pipeline.postprocessors.pixelize.mode = "kmeans"
+    # pipeline.postprocessors.pixelize.mode = "kmeans"
 
-    del pipeline.postprocessors
+    # del pipeline.postprocessors
 
-    for i in range(1337, 1340):
-        generate(f"flute4_{i}", "mimic", 16, i)
+    for i in range(1, 6):
+        generate(f"retardation_{i}", "cfg", 4, i)

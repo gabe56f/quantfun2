@@ -4,10 +4,37 @@ import einops
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils._triton import has_triton
 
 from ...misc.padding import pad_input, _upad_input
 
-ATTN: Literal["sdpa", "flash", "sage"] = "sdpa"
+
+# if has_triton():
+#     from ...kernels.rope import apply_merged_rotary_embedding
+# else:
+
+
+def apply_merged_rotary_embedding(
+    xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 2)
+    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 2)
+
+    xq_complex = torch.view_as_complex(xq_)
+    xk_complex = torch.view_as_complex(xk_)
+
+    freqs_cis = freqs_cis.unsqueeze(2)
+
+    xq_out = xq_complex * freqs_cis
+    xk_out = xk_complex * freqs_cis
+
+    xq_out = torch.view_as_real(xq_out).flatten(-2)
+    xk_out = torch.view_as_real(xk_out).flatten(-2)
+
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+ATTN: Literal["sdpa", "flash", "sage"] = "flash"
 
 
 # TODO: bring out to helper class
@@ -20,6 +47,7 @@ def do_attn(
     apply_fn: callable,
     batch: int,
     seq_len: int,
+    softmax_scale: float = None,
 ) -> torch.Tensor:
     if ATTN != "sdpa" and xq.dtype in [torch.bfloat16, torch.float16]:
         (
@@ -47,7 +75,7 @@ def do_attn(
                 max_seqlen_k=max_seqlen_in_batch_k,
                 dropout_p=0.0,
                 causal=False,
-                softmax_scale=None,
+                softmax_scale=softmax_scale,
                 # softcap=30,
             )
         else:
@@ -61,6 +89,7 @@ def do_attn(
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=max_seqlen_in_batch_q,
                 max_seqlen_k=max_seqlen_in_batch_k,
+                sm_scale=softmax_scale,
             )
         return pad_input(attn_output_unpad, indices_q, batch, seq_len)
 
@@ -69,7 +98,7 @@ def do_attn(
         xk.permute(0, 2, 1, 3),
         xv.permute(0, 2, 1, 3),
         attn_mask=apply_fn(attn_mask),
-        scale=None,
+        scale=softmax_scale,
     ).permute(0, 2, 1, 3)
 
 
@@ -85,6 +114,7 @@ class Attention(nn.Module):
         proportional_attn: bool = False,
         attention_dropout: float = 0.0,
         max_position_embeddings: int = 384,
+        qk_bias: bool = True,
     ):
         super().__init__()
         self.dim = dim
@@ -110,56 +140,24 @@ class Attention(nn.Module):
         self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False)
 
         if qk_norm:
-            self.q_norm = nn.LayerNorm(self.n_heads * self.head_dim)
-            self.k_norm = nn.LayerNorm(self.n_kv_heads * self.head_dim)
+            if not qk_bias:
+                self.q_norm = nn.LayerNorm(self.head_dim, bias=qk_bias)
+                self.k_norm = nn.LayerNorm(self.head_dim, bias=qk_bias)
+            else:
+                self.q_norm = nn.LayerNorm(self.n_heads * self.head_dim, bias=qk_bias)
+                self.k_norm = nn.LayerNorm(
+                    self.n_kv_heads * self.head_dim, bias=qk_bias
+                )
             if y_dim > 0:
-                self.ky_norm = nn.LayerNorm(self.n_kv_heads * self.head_dim, eps=1e-6)
+                self.ky_norm = nn.LayerNorm(
+                    self.n_kv_heads * self.head_dim, eps=1e-6, bias=qk_bias
+                )
             else:
                 self.ky_norm = nn.Identity()
         else:
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
             self.ky_norm = nn.Identity()
-
-    # @staticmethod
-    # def apply_rotary_embedding(
-    #     xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
-    # ) -> tuple[torch.Tensor, torch.Tensor]:
-    #     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 2)
-    #     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 2)
-
-    #     freqs_cis = freqs_cis.unsqueeze(2)
-
-    #     xq_out_real = xq_[..., 0] * freqs_cis[..., 0] - xq_[..., 1] * freqs_cis[..., 1]
-    #     xq_out_imag = xq_[..., 0] * freqs_cis[..., 1] + xq_[..., 1] * freqs_cis[..., 0]
-
-    #     xk_out_real = xk_[..., 0] * freqs_cis[..., 0] - xk_[..., 1] * freqs_cis[..., 1]
-    #     xk_out_imag = xk_[..., 0] * freqs_cis[..., 1] + xk_[..., 1] * freqs_cis[..., 0]
-
-    #     xq_out = torch.stack((xq_out_real, xq_out_imag), dim=-1).flatten(-2)
-    #     xk_out = torch.stack((xk_out_real, xk_out_imag), dim=-1).flatten(-2)
-
-    #     return xq_out.type_as(xq), xk_out.type_as(xk)
-
-    @staticmethod
-    def apply_rotary_embedding(
-        xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        xq_ = xq.float().reshape(*xq.shape[:-1], -1, 2)
-        xk_ = xk.float().reshape(*xk.shape[:-1], -1, 2)
-
-        xq_complex = torch.view_as_complex(xq_)
-        xk_complex = torch.view_as_complex(xk_)
-
-        freqs_cis = freqs_cis.unsqueeze(2)
-
-        xq_out = xq_complex * freqs_cis
-        xk_out = xk_complex * freqs_cis
-
-        xq_out = torch.view_as_real(xq_out).flatten(-2)
-        xk_out = torch.view_as_real(xk_out).flatten(-2)
-
-        return xq_out.type_as(xq), xk_out.type_as(xk)
 
     def forward(
         self,
@@ -193,7 +191,7 @@ class Attention(nn.Module):
             xv = xv.repeat_interleave(n_repeat, dim=2)
 
         freqs_cis = freqs_cis.to(xq.device)
-        xq, xk = self.apply_rotary_embedding(xq, xk, freqs_cis)
+        xq, xk = apply_merged_rotary_embedding(xq, xk, freqs_cis)
 
         output = do_attn(
             self,

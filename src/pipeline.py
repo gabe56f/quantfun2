@@ -363,8 +363,7 @@ class Pipelinelike:
 
                         param.module_load(tensor.to(dtype=torch_dtype))
                     except:  # noqa
-                        print(f"failed to load {tensor_name}")
-                        pass
+                        raise ValueError(f"failed to load {tensor_name}")
 
                 if _nil(model, cur_fqn[:-1]):
                     model = dtype(

@@ -4,26 +4,55 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils._triton import has_triton
 
 from .attn import Attention
 from .utils import modulate
 
+if has_triton():
+    from ...kernels.rmsnorm import apply_rmsnorm
+
+    # from ...kernels.ffn import ffn_forward
+else:
+
+    def apply_rmsnorm(
+        x: torch.Tensor, weight: torch.Tensor, eps: float
+    ) -> torch.Tensor:
+        def _norm(x: torch.Tensor) -> torch.Tensor:
+            nonlocal eps
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
+
+        output = _norm(x.float()).type_as(x)
+        return output * weight
+
+
+def ffn_forward(
+    x: torch.Tensor,
+    dim: int,
+    hidden_dim: int,
+    w1: torch.nn.Linear,
+    w2: torch.nn.Linear,
+    w3: torch.nn.Linear,
+) -> torch.Tensor:
+    return w2(F.silu(w1(x)) * w3(x))
+
 
 class TimestepEmbedder(nn.Module):
-    def __init__(self, hidden_size: int, frequency_embeddings_size: int = 256):
+    def __init__(
+        self, hidden_size: int, frequency_embeddings_size: int = 256, bias: bool = False
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.frequency_embeddings_size = frequency_embeddings_size
 
         self.mlp = nn.Sequential(
-            nn.Linear(frequency_embeddings_size, hidden_size),
+            nn.Linear(frequency_embeddings_size, hidden_size, bias=bias),
             nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size, bias=bias),
         )
 
-    @staticmethod
     def timestep_embedding(
-        t: torch.Tensor, dim: int, max_period: int = 10_000
+        self, t: torch.Tensor, dim: int, max_period: int = 10_000
     ) -> torch.Tensor:
         half = dim // 2
         frequencies = torch.exp(
@@ -47,18 +76,21 @@ class TimestepEmbedder(nn.Module):
 
 
 class TransformerFinalLayer(nn.Module):
-    def __init__(self, hidden_size: int, num_patches: int, out_channels: int):
+    def __init__(
+        self, hidden_size: int, num_patches: int, out_channels: int, bias: bool = False
+    ):
         super().__init__()
+        self.lumina = bias
         self.norm_final = nn.LayerNorm(hidden_size, eps=1e-6, elementwise_affine=False)
-        self.linear = nn.Linear(hidden_size, num_patches * out_channels)
+        self.linear = nn.Linear(hidden_size, num_patches * out_channels, bias=bias)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(min(hidden_size, 1024), hidden_size),
+            nn.Linear(min(hidden_size, 1024), hidden_size, bias=bias),
         )
 
     def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         scale = self.adaLN_modulation(c)
-        x = modulate(self.norm_final(x), scale)
+        x = modulate(self.norm_final(x), scale.unsqueeze(1) if self.lumina else scale)
         x = self.linear(x)
         return x
 
@@ -69,12 +101,8 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        return apply_rmsnorm(x, self.weight, self.eps)
 
 
 class LlamaFeedForward(nn.Module):
@@ -86,6 +114,7 @@ class LlamaFeedForward(nn.Module):
         ffn_dim_multiplier: float = None,
         zeros_initialize: bool = True,
         dtype: torch.dtype = torch.float32,
+        hidden_dim_type: str = "onediff",
     ):
         super().__init__()
         self.dim = dim
@@ -95,29 +124,29 @@ class LlamaFeedForward(nn.Module):
         self.zeros_initialize = zeros_initialize
         self.dtype = dtype
 
-        hidden_dim_calculated = int(2 * self.hidden_dim / 3)
-        if self.ffn_dim_multiplier is not None:
-            hidden_dim_calculated = int(self.ffn_dim_multiplier * hidden_dim_calculated)
-        self.hidden_dim_calculated = self.multiple_of * (
-            (hidden_dim_calculated + self.multiple_of - 1) // self.multiple_of
-        )
+        if hidden_dim_type == "onediff":
+            hidden_dim_calculated = int(2 * self.hidden_dim / 3)
+            if self.ffn_dim_multiplier is not None:
+                hidden_dim_calculated = int(
+                    self.ffn_dim_multiplier * hidden_dim_calculated
+                )
+            self.hidden_dim_calculated = self.multiple_of * (
+                (hidden_dim_calculated + self.multiple_of - 1) // self.multiple_of
+            )
+        else:
+            if self.ffn_dim_multiplier is not None:
+                hidden_dim_calculated = int(self.ffn_dim_multiplier * self.hidden_dim)
+            hidden_dim_calculated = self.multiple_of * (
+                (self.hidden_dim + self.multiple_of - 1) // self.multiple_of
+            )
+        self.hidden_dim = hidden_dim_calculated
 
         self.w1 = nn.Linear(dim, hidden_dim_calculated, bias=False)
         self.w2 = nn.Linear(hidden_dim_calculated, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim_calculated, bias=False)
 
-        if self.zeros_initialize:
-            nn.init.zeros_(self.w2.weight)
-        else:
-            nn.init.xavier_uniform_(self.w2.weight)
-        nn.init.xavier_uniform_(self.w1.weight)
-        nn.init.xavier_uniform_(self.w3.weight)
-
-    def _forward_silu_gating(self, x1: torch.Tensor, x3: torch.Tensor) -> torch.Tensor:
-        return F.silu(x1) * x3
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(self._forward_silu_gating(self.w1(x), self.w3(x)))
+        return ffn_forward(x, self.dim, self.hidden_dim, self.w1, self.w2, self.w3)
 
 
 class TransformerBlock(nn.Module):
