@@ -34,7 +34,7 @@ def apply_merged_rotary_embedding(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-ATTN: Literal["sdpa", "flash", "sage"] = "sage"
+ATTN: Literal["sdpa", "flash", "sage", "flash-int8"] = "flash-int8"
 
 
 # TODO: bring out to helper class
@@ -77,6 +77,19 @@ def do_attn(
                 causal=False,
                 softmax_scale=softmax_scale,
                 # softcap=30,
+            )
+        elif ATTN == "flash-int8":
+            from ...kernels.fa import _Attention
+
+            attn_output_unpad = _Attention.apply(
+                query_states,
+                key_states,
+                value_states,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_in_batch_q,
+                max_seqlen_in_batch_k,
+                softmax_scale,
             )
         else:
             from sageattention import sageattn_varlen

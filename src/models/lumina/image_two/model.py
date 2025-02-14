@@ -57,18 +57,14 @@ class JointAttention(nn.Module):
         else:
             self.q_norm = self.k_norm = nn.Identity()
 
-    @staticmethod
-    def apply_rotary_embedding(x_in: torch.Tensor, freqs_cis: torch.Tensor):
-        with torch.autocast("cuda", enabled=False):
-            x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
-            freqs_cis = freqs_cis.unsqueeze(2)
-            x_out = torch.view_as_real(x * freqs_cis).flatten(3)
-            return x_out.type_as(x_in)
-
     def forward(
         self, x: torch.Tensor, x_mask: torch.Tensor, freqs_cis: torch.Tensor
     ) -> torch.Tensor:
+        # from time import time
+
+        # t0 = time()
         bsz, seqlen, _ = x.shape
+        # print(f"JointAttention {x.shape}")
 
         xq = self.wq(x)
         xk = self.wk(x)
@@ -102,7 +98,9 @@ class JointAttention(nn.Module):
             softmax_scale,
         )
         output = output.flatten(-2)
-        return self.wo(output)
+        ret = self.wo(output)
+        # print(f"JointAttention {time() - t0:.4f}")
+        return ret
 
 
 class JointTransformerBlock(nn.Module):

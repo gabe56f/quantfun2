@@ -6,7 +6,7 @@ import src.quant as q
 from src.models import OneDiffusionPipeline
 from src.models.lumina.image_two.pipeline import LuminaImageTwoPipeline
 
-model_path = "./lumina-image-2.0-bf16-diffusers/"
+model_path = "../lumina-image-2.0-bf16-diffusers/"
 
 with torch.inference_mode():
     if True:
@@ -17,7 +17,7 @@ with torch.inference_mode():
         model_path,
         dtype={
             "transformer": torch.bfloat16,  # partial(q.qfloatx, 3, 2),  # fp6 (sign+3+2)
-            "text_encoder": partial(q.qint8),  # int4
+            "text_encoder": partial(q.qint8),  # int8
         },
         device="cpu",
     )
