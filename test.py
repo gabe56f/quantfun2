@@ -56,7 +56,7 @@ with torch.inference_mode():
             [
                 # "[[image_editing]] make the man be in a suit and tie with a top hat and a monocle",
                 prompt(
-                    "an anime girl with long white hair and heterochromia in an apron inside a kitchen. Make sure it's anime style all the way thru"
+                    "an anthropomorphic cat driving a lamborghini into a huge tree with a huge explosion, car crash"
                 ),
                 (
                     prompt(
@@ -67,7 +67,7 @@ with torch.inference_mode():
             ],
             images_per_prompt=1,
             seed=seed,
-            steps=50,
+            steps=24,
             # image=Image.open("kopp.png"),
             size=(1024, 1024),
             cfg=scale,

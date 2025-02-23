@@ -3,146 +3,18 @@ from diffusers.models.modeling_utils import ModelMixin
 import numpy as np
 import torch
 from torch import nn
-from torch.nn import functional as F
-from torch.utils._triton import has_triton
 
-from .attn import Attention
-from .utils import modulate
-
-if has_triton():
-    from ...kernels.rmsnorm import apply_rmsnorm
-else:
-
-    def apply_rmsnorm(
-        x: torch.Tensor, weight: torch.Tensor, eps: float
-    ) -> torch.Tensor:
-        def _norm(x: torch.Tensor) -> torch.Tensor:
-            nonlocal eps
-            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
-
-        output = _norm(x.float()).type_as(x)
-        return output * weight
-
-
-class TimestepEmbedder(nn.Module):
-    def __init__(
-        self, hidden_size: int, frequency_embeddings_size: int = 256, bias: bool = False
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.frequency_embeddings_size = frequency_embeddings_size
-
-        self.mlp = nn.Sequential(
-            nn.Linear(frequency_embeddings_size, hidden_size, bias=bias),
-            nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=bias),
-        )
-
-    def timestep_embedding(
-        self, t: torch.Tensor, dim: int, max_period: int = 10_000
-    ) -> torch.Tensor:
-        half = dim // 2
-        frequencies = torch.exp(
-            -torch.log(torch.tensor(max_period, dtype=t.dtype, device=t.device))
-            * torch.arange(0, half, dtype=t.dtype)
-            / half
-        ).to(t.device)
-        args = t[:, :, None] * frequencies[None, :]
-        embeddings = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embeddings = torch.cat(
-                [embeddings, torch.zeros_like(embeddings[:, :, :1])], dim=-1
-            )
-        return embeddings
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        timestep_frequencies = self.timestep_embedding(
-            t, self.frequency_embeddings_size
-        )
-        timestep_frequencies = timestep_frequencies.to(torch.bfloat16)
-        # timestep_frequencies = timestep_frequencies.to(self.mlp[0].weight.dtype)
-        return self.mlp(timestep_frequencies)
-
-
-class TransformerFinalLayer(nn.Module):
-    def __init__(
-        self, hidden_size: int, num_patches: int, out_channels: int, bias: bool = False
-    ):
-        super().__init__()
-        self.lumina = bias
-        self.norm_final = nn.LayerNorm(hidden_size, eps=1e-6, elementwise_affine=False)
-        self.linear = nn.Linear(hidden_size, num_patches * out_channels, bias=bias)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(min(hidden_size, 1024), hidden_size, bias=bias),
-        )
-
-    def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-        scale = self.adaLN_modulation(c)
-        x = modulate(self.norm_final(x), scale.unsqueeze(1) if self.lumina else scale)
-        x = self.linear(x)
-        return x
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return apply_rmsnorm(x, self.weight, self.eps)
-
-
-class LlamaFeedForward(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: float = None,
-        zeros_initialize: bool = True,
-        dtype: torch.dtype = torch.float32,
-        hidden_dim_type: str = "onediff",
-    ):
-        super().__init__()
-        self.dim = dim
-        self.hidden_dim = hidden_dim
-        self.multiple_of = multiple_of
-        self.ffn_dim_multiplier = ffn_dim_multiplier
-        self.zeros_initialize = zeros_initialize
-        self.dtype = dtype
-
-        if hidden_dim_type == "onediff":
-            hidden_dim_calculated = int(2 * self.hidden_dim / 3)
-            if self.ffn_dim_multiplier is not None:
-                hidden_dim_calculated = int(
-                    self.ffn_dim_multiplier * hidden_dim_calculated
-                )
-            self.hidden_dim_calculated = self.multiple_of * (
-                (hidden_dim_calculated + self.multiple_of - 1) // self.multiple_of
-            )
-        else:
-            if self.ffn_dim_multiplier is not None:
-                hidden_dim_calculated = int(self.ffn_dim_multiplier * self.hidden_dim)
-            hidden_dim_calculated = self.multiple_of * (
-                (self.hidden_dim + self.multiple_of - 1) // self.multiple_of
-            )
-        self.hidden_dim = hidden_dim_calculated
-
-        self.w1 = nn.Linear(dim, hidden_dim_calculated, bias=False)
-        self.w2 = nn.Linear(hidden_dim_calculated, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim_calculated, bias=False)
-
-        self.silu = nn.SiLU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(self.silu(self.w1(x)) * self.w3(x))
+from ..common.attn import Attention
+from ..common.rmsnorm import RMSNorm
+from ..common.nextdit import TimestepEmbedder, TransformerFinalLayer, LlamaFeedForward
+from ..common.utilities import modulate
 
 
 class TransformerBlock(nn.Module):
     def __init__(
         self,
+        layer_id: int,
+        n_layers: int,
         dim: int,
         n_heads: int,
         n_kv_heads: int,
@@ -155,6 +27,8 @@ class TransformerBlock(nn.Module):
     ):
         super().__init__()
         self.attention = Attention(
+            layer_id,
+            n_layers,
             dim,
             n_heads,
             n_kv_heads,
@@ -274,6 +148,8 @@ class NextDiT(ModelMixin, ConfigMixin):
         self.layers = nn.ModuleList(
             [
                 TransformerBlock(
+                    layer_id=i,
+                    n_layers=depth,
                     dim=hidden_size,
                     n_heads=num_heads,
                     n_kv_heads=self.num_kv_heads,
@@ -284,7 +160,7 @@ class NextDiT(ModelMixin, ConfigMixin):
                     y_dim=caption_channels,
                     max_position_embeddings=rotary_max_length,
                 )
-                for _ in range(depth)
+                for i in range(depth)
             ]
         )
 

@@ -1,17 +1,11 @@
-import math
-
 import torch
 from torch import nn
 import numpy as np
 
-from ...onediff.attn import apply_merged_rotary_embedding, do_attn, ATTN
-from ...onediff.model import (
-    RMSNorm,
-    TimestepEmbedder,
-    LlamaFeedForward,
-    TransformerFinalLayer,
-)
-from ...onediff.utils import modulate
+from ...common.attn import JointAttention
+from ...common.rmsnorm import RMSNorm
+from ...common.nextdit import TimestepEmbedder, TransformerFinalLayer, LlamaFeedForward
+from ...common.utilities import modulate
 
 
 class LuminaTimestepEmbedder(TimestepEmbedder):
@@ -34,79 +28,11 @@ class LuminaTimestepEmbedder(TimestepEmbedder):
         return embedding
 
 
-class JointAttention(nn.Module):
-    def __init__(
-        self, dim: int, n_heads: int, n_kv_heads: int = None, qk_norm: bool = False
-    ):
-        super().__init__()
-        self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
-        self.n_heads = n_heads
-        self.n_local_kv_heads = self.n_kv_heads
-        self.n_rep = self.n_heads // self.n_local_kv_heads
-        self.head_dim = dim // n_heads
-
-        self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-
-        self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False)
-
-        if qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
-        else:
-            self.q_norm = self.k_norm = nn.Identity()
-
-    def forward(
-        self, x: torch.Tensor, x_mask: torch.Tensor, freqs_cis: torch.Tensor
-    ) -> torch.Tensor:
-        # from time import time
-
-        # t0 = time()
-        bsz, seqlen, _ = x.shape
-        # print(f"JointAttention {x.shape}")
-
-        xq = self.wq(x)
-        xk = self.wk(x)
-        xv = self.wv(x)
-
-        xq = xq.view(bsz, seqlen, self.n_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xq = self.q_norm(xq)
-        xk = self.k_norm(xk)
-
-        xq, xk = apply_merged_rotary_embedding(xq, xk, freqs_cis)
-
-        softmax_scale = math.sqrt(1 / self.head_dim)
-        if ATTN == "sdpa":
-            n_rep = self.n_heads // self.n_local_kv_heads
-            if n_rep >= 1:
-                xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-                xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-        output = do_attn(
-            self,
-            xq,
-            xk,
-            xv,
-            x_mask,
-            lambda x: x.bool()
-            .view(bsz, 1, 1, seqlen)
-            .expand(-1, self.n_heads, seqlen, -1),
-            bsz,
-            seqlen,
-            softmax_scale,
-        )
-        output = output.flatten(-2)
-        ret = self.wo(output)
-        # print(f"JointAttention {time() - t0:.4f}")
-        return ret
-
-
 class JointTransformerBlock(nn.Module):
     def __init__(
         self,
         layer_id: int,
+        n_layers: int,
         dim: int,
         n_heads: int,
         n_kv_heads: int,
@@ -119,7 +45,9 @@ class JointTransformerBlock(nn.Module):
         super().__init__()
         self.dim = dim
         self.head_dim = dim // n_heads
-        self.attention = JointAttention(dim, n_heads, n_kv_heads, qk_norm)
+        self.attention = JointAttention(
+            layer_id, n_layers, dim, n_heads, n_kv_heads, qk_norm
+        )
         self.feed_forward = LlamaFeedForward(
             dim=dim,
             hidden_dim=4 * dim,
@@ -256,6 +184,7 @@ class LuminaDiT(nn.Module):
             [
                 JointTransformerBlock(
                     layer_id,
+                    10000,
                     dim,
                     n_heads,
                     n_kv_heads,
@@ -272,6 +201,7 @@ class LuminaDiT(nn.Module):
             [
                 JointTransformerBlock(
                     layer_id,
+                    10000,
                     dim,
                     n_heads,
                     n_kv_heads,
@@ -292,6 +222,7 @@ class LuminaDiT(nn.Module):
             [
                 JointTransformerBlock(
                     layer_id,
+                    n_layers,
                     dim,
                     n_heads,
                     n_kv_heads,

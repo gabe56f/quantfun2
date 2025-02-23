@@ -4,7 +4,10 @@ from typing import List, Optional, Tuple, Union, Dict
 import einops
 import numpy as np
 import torch
-from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
+    FlowMatchEulerDiscreteScheduler,
+)
 from PIL import Image
 from torchvision import transforms as T
 from tqdm.auto import tqdm

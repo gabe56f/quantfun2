@@ -1,200 +1,191 @@
 import torch
-import torch.nn.functional as F
-import triton
-import triton.language as tl
 
 
-@torch.no_grad()
-def ffn_forward(
-    x: torch.Tensor,
-    dim: int,
-    hidden_dim: int,
-    w1: torch.nn.Linear,
-    w2: torch.nn.Linear,
-    w3: torch.nn.Linear,
-) -> torch.Tensor:
-    return w2(F.silu(w1(x)) * w3(x))
+def binary_search_topk(v, k, max_iter=None):
+    """
+    Binary Search-based Top-k Algorithm (with optional Early Stopping).
+
+    Args:
+        v: Input vector (torch.Tensor).
+        k: The number of largest elements to select.
+        max_iter: Maximum number of iterations for early stopping.
+                  If None, run until convergence (Algorithm 1).
+                  If an integer, implement early stopping (Algorithm 2).
+
+    Returns:
+        A tuple containing:
+            - elems: The top-k largest elements.
+            - indices: The corresponding indices of the top-k elements in v.
+    """
+    min_val = torch.min(v)
+    max_val = torch.max(v)
+
+    if max_iter is None:  # Algorithm 1: No Early Stopping
+        epsilon = 1e-4 * max_val
+        while max_val - min_val > epsilon:
+            mid = (min_val + max_val) / 2
+            cnt = torch.sum((v >= mid).int())  # Count elements >= mid
+
+            if cnt == k:
+                elems = v[v >= mid]
+                indices = torch.nonzero(
+                    v >= mid
+                ).squeeze()  # Use nonzero to get indices
+                return elems, indices
+            elif cnt < k:
+                max_val = mid
+            else:  # cnt > k
+                min_val = mid
+
+        # Handle the case where the loop exits due to epsilon (cnt != k)
+        elems_ge_mid_plus_eps = v[v >= mid + epsilon]  # using mid + eps to get elements
+        indices_ge_mid_plus_eps = torch.nonzero(v >= mid + epsilon).squeeze()
+
+        elems_between = v[
+            (v >= mid - epsilon) & (v < mid + epsilon)
+        ]  # between [mid-eps,mid+eps)
+        indices_between = torch.nonzero(
+            (v >= mid - epsilon) & (v < mid + epsilon)
+        ).squeeze()
+
+        # Concatenate and take the first k elements
+        num_remaining = k - elems_ge_mid_plus_eps.numel()
+        elems = torch.cat([elems_ge_mid_plus_eps, elems_between[:num_remaining]])
+        indices = torch.cat([indices_ge_mid_plus_eps, indices_between[:num_remaining]])
+        return elems, indices
+
+    else:  # Algorithm 2: With Early Stopping
+        for _ in range(max_iter):
+            mid = (min_val + max_val) / 2
+            cnt = torch.sum((v >= mid).int())
+
+            if cnt == k:
+                elems = v[v >= mid]
+                indices = torch.nonzero(v >= mid).squeeze()
+                return elems, indices
+
+            elif cnt < k:
+                max_val = mid
+            else:
+                min_val = mid
+
+        # After max_iter iterations, use min_val as the threshold
+        elems = v[v >= min_val]
+        indices = torch.nonzero(v >= min_val).squeeze()
+        # Take the first k
+        return elems[:k], indices[:k]
 
 
-def get_configs():
-    configs = []
-    for k in range(8, 11):
-        configs.append(
-            triton.Config(
-                {
-                    "BLOCK_D": 512,
-                    "BLOCK_K": 2**k,
-                },
-                num_warps=4,
-                num_stages=3,
-            )
-        )
-    return configs
+def row_wise_topk(matrix, k, max_iter=None):
+    """
+    Applies the binary search top-k algorithm row-wise to a matrix.
+
+    Args:
+        matrix: Input matrix (torch.Tensor).
+        k: The number of largest elements to select per row.
+        max_iter:  Maximum iterations for early stopping (optional).
+
+    Returns:
+        A tuple containing:
+            - elems: Top-k elements for each row (list of tensors).
+            - indices: Corresponding indices for each row (list of tensors).
+    """
+    all_elems = []
+    all_indices = []
+    for row in matrix:
+        elems, indices = binary_search_topk(row, k, max_iter)
+        all_elems.append(elems)
+        all_indices.append(indices)
+    return all_elems, all_indices
 
 
-@triton.autotune(configs=get_configs(), key=["hidden_dim"])
-@triton.jit
-def ffn_forward_kernel(
-    x_ptr,
-    w1_ptr,
-    w3_ptr,
-    w2_t_ptr,
-    output_ptr,
-    input_dim: tl.constexpr,
-    hidden_dim: tl.constexpr,
-    seq_len: tl.constexpr,
-    output_dim: tl.constexpr,
-    x_batch_stride,
-    x_seq_stride,
-    x_feature_stride,
-    w1_row_stride,
-    w1_feature_stride,
-    w3_row_stride,
-    w3_feature_stride,
-    w2_t_row_stride,
-    output_batch_stride,
-    output_seq_stride,
-    output_feature_stride,
-    BLOCK_D: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    pid_ij = tl.program_id(0)
-    pid_k = tl.program_id(1)
-    i = pid_ij // seq_len
-    j = pid_ij % seq_len
+def test():
+    # --- Test Cases ---
+    # Test case 1: Basic test with a small vector (Algorithm 1)
+    v1 = torch.tensor([1, 5, 2, 8, 3, 9, 4, 7, 6])
+    k1 = 3
+    elems1, indices1 = binary_search_topk(v1, k1)
+    print(f"Test Case 1 (No Early Stopping): elems={elems1}, indices={indices1}")
+    expected_elems1 = torch.tensor([9, 8, 7])  # Example expected values (may vary)
+    expected_indices1 = torch.tensor([5, 3, 7])
+    expected_elems1, _ = torch.sort(expected_elems1, descending=True)
+    elems1, _ = torch.sort(elems1, descending=True)
+    assert torch.allclose(
+        elems1, expected_elems1
+    ), f"Test Case 1 Failed: {elems1} != {expected_elems1}"
+    assert torch.all(
+        torch.isin(expected_indices1, indices1)
+    ), f"Indices mismatch: {indices1}"
 
-    x_offset = i * x_batch_stride + j * x_seq_stride
+    # Test case 2: Basic test with early stopping
+    v2 = torch.tensor([1, 5, 2, 8, 3, 9, 4, 7, 6])
+    k2 = 3
+    max_iter2 = 5  # Early stopping after 5 iterations
+    elems2, indices2 = binary_search_topk(v2, k2, max_iter2)
+    print(f"Test Case 2 (Early Stopping): elems={elems2}, indices={indices2}")
 
-    # Current k block indices
-    k_indices = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
-    k_mask = k_indices < output_dim
-
-    # Initialize accumulator
-    output_acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
-
-    # Loop over all hidden_dim (m)
-    for m in range(hidden_dim):
-        w1x = 0.0
-        w3x = 0.0
-        # Loop over input_dim in blocks
-        for d_block in range(0, tl.cdiv(input_dim, BLOCK_D)):
-            d_indices = d_block * BLOCK_D + tl.arange(0, BLOCK_D)
-            d_mask = d_indices < input_dim
-
-            x_ptrs = x_ptr + x_offset + d_indices * x_feature_stride
-            x = tl.load(x_ptrs, mask=d_mask, other=0.0)
-
-            w1_ptrs = w1_ptr + m * w1_row_stride + d_indices * w1_feature_stride
-            w1 = tl.load(w1_ptrs, mask=d_mask, other=0.0)
-            w1x += tl.sum(x * w1)
-
-            w3_ptrs = w3_ptr + m * w3_row_stride + d_indices * w3_feature_stride
-            w3 = tl.load(w3_ptrs, mask=d_mask, other=0.0)
-            w3x += tl.sum(x * w3)
-
-        # Compute a = SiLU(w1x) * w3x
-        silu = tl.sigmoid(w1x) * w1x
-        a = silu * w3x
-
-        # Load w2_t[m, k] for current k block
-        w2_t_ptrs = w2_t_ptr + m * w2_t_row_stride + k_indices
-        w2_t = tl.load(w2_t_ptrs, mask=k_mask, other=0.0)
-
-        # Accumulate into output
-        output_acc += a * w2_t
-
-    # Write output
-    output_offset = (
-        i * output_batch_stride
-        + j * output_seq_stride
-        + k_indices * output_feature_stride
-    )
-    output_ptrs = output_ptr + output_offset
-    tl.store(output_ptrs, output_acc, mask=k_mask)
-
-
-def ffn_forward_triton(
-    x: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w3: torch.Tensor,
-) -> torch.Tensor:
-    batch_size, seq_len, input_dim = x.shape
-    hidden_dim, _ = w1.shape
-    output_dim, _ = w2.shape
-    print(hidden_dim, output_dim, input_dim)
-    output = torch.empty(
-        (batch_size, seq_len, output_dim), device=x.device, dtype=x.dtype
-    )
-
-    def grid(META):
-        return (batch_size * seq_len, triton.cdiv(output_dim, META["BLOCK_K"]))
-
-    w2_t = w2.T.contiguous()
-
-    ffn_forward_kernel[grid](
-        x,
-        w1,
-        w3,
-        w2_t,
-        output,
-        input_dim,
-        hidden_dim,
-        seq_len,
-        output_dim,
-        x.stride(0),
-        x.stride(1),
-        x.stride(2),
-        w1.stride(0),
-        w1.stride(1),
-        w3.stride(0),
-        w3.stride(1),
-        w2_t.stride(0),
-        output.stride(0),
-        output.stride(1),
-        output.stride(2),
-    )
-    return output
-
-
-def test_ffn():
-    torch.manual_seed(0)
-    x = torch.randn(2, 256, 2304, device="cuda", dtype=torch.float16)
-    dim = 2304
-    hidden_dim = 9216
-    w1 = torch.nn.Linear(
-        dim, hidden_dim, bias=False, device="cuda", dtype=torch.float16
-    )
-    w2 = torch.nn.Linear(
-        hidden_dim, dim, bias=False, device="cuda", dtype=torch.float16
-    )
-    w3 = torch.nn.Linear(
-        dim, hidden_dim, bias=False, device="cuda", dtype=torch.float16
+    # Test case 3: Row-wise top-k on a matrix
+    matrix3 = torch.tensor([[1, 5, 2], [8, 3, 9], [4, 7, 6]])
+    k3 = 2
+    elems3, indices3 = row_wise_topk(matrix3, k3)
+    print(
+        f"Test Case 3 (Row-wise, No Early Stopping): elems={elems3}, indices={indices3}"
     )
 
-    out_torch = ffn_forward(x, dim, hidden_dim, w1, w2, w3)
-    out_triton = ffn_forward_triton(x, w1.weight, w2.weight, w3.weight)
+    # Test case 4: Row-wise top-k with early stopping
+    matrix4 = torch.tensor([[1, 5, 2], [8, 3, 9], [4, 7, 6]])
+    k4 = 2
+    max_iter4 = 3  # Early stopping after 3 iterations
+    elems4, indices4 = row_wise_topk(matrix4, k4, max_iter4)
+    print(f"Test Case 4 (Row-wise, Early Stopping): elems={elems4}, indices={indices4}")
 
-    print(f"Output max difference: {torch.max(torch.abs(out_torch - out_triton))}")
-    torch.testing.assert_close(out_torch, out_triton, atol=1e-4, rtol=1e-4)
-    print("Test passed!")
+    # Test case 5: Larger matrix and k (for performance and correctness)
+    matrix5 = torch.randn(100, 256)  # 100 rows, 256 columns
+    k5 = 64
+    elems5, indices5 = row_wise_topk(matrix5, k5)
+    print(
+        f"Test Case 5 (Large Matrix): elems (first row)={elems5[0]}, indices (first row)={indices5[0]}"
+    )
 
-    from time import time
+    # Test case 6:  Larger Matrix, No Early Stopping (to test edge cases of Algorithm 1)
+    matrix6 = torch.randn(100, 256)
+    k6 = 16
+    elems6, indices6 = row_wise_topk(matrix6, k6)
+    print(
+        f"Test case 6 (Large Matrix, No Early Stopping): elems (first row)={elems6[0]}, indices(first row)={indices6[0]}"
+    )
 
-    # Benchmarking
-    n_repeat = 100
-    print("Benchmarking...")
-    t0 = time()
-    for _ in range(n_repeat):
-        out_triton = ffn_forward_triton(x, w1.weight, w2.weight, w3.weight)
-    triton_time = time() - t0
-    t0 = time()
-    for _ in range(n_repeat):
-        out_triton = ffn_forward(x, 0, 0, w1, w2, w3)
-    torch_time = time() - t0
-    print(f"Triton time: {triton_time:.5f}ms")
-    print(f"Torch time: {torch_time:.5f}ms")
+    # Test case 7: Vector with many duplicate values
+    v7 = torch.tensor([5, 5, 5, 2, 2, 8, 8, 8, 1, 9, 9])
+    k7 = 4
+    elems7, indices7 = binary_search_topk(v7, k7)
+    print(f"Test case 7 (duplicates): elems={elems7}, indices={indices7}")
+    # Test Case 8:  Edge Case, k = 1
+    v8 = torch.randn(100)
+    k8 = 1
+    elems8, indices8 = binary_search_topk(v8, k8)
+    print(f"Test Case 8 (k=1): elems={elems8}, indices={indices8}")
+    assert elems8.numel() == 1 and indices8.numel() == 1
+
+    # Test Case 9: Edge Case, k = M (length of vector)
+    v9 = torch.randn(100)
+    k9 = v9.numel()
+    elems9, indices9 = binary_search_topk(v9, k9)
+    print(
+        f"Test Case 9 (k=M): elems (first 5)={elems9[:5]}, indices (first 5)={indices9[:5]}"
+    )
+    assert elems9.numel() == k9 and indices9.numel() == k9
+    assert torch.allclose(torch.sort(v9, descending=True)[0], elems9)
+
+    # Test Case 10: Edge Case, All elements are equal
+    v10 = torch.ones(100)
+    k10 = 10
+    elems10, indices10 = binary_search_topk(v10, k10)
+    print(f"Test Case 10 (all equal): elems={elems10}, indices={indices10}")
+    assert elems10.numel() == k10 and indices10.numel() == k10
+
+    print("All test cases run.")
 
 
 if __name__ == "__main__":
-    test_ffn()
+    test()

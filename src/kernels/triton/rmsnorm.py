@@ -6,19 +6,20 @@ import triton.language as tl
 def get_configs():
     configs = []
     for k in range(6, 11):
-        for warp in [1, 2, 4]:
+        for warp in [1, 2, 8]:
             configs.append(
                 triton.Config(
                     {
                         "BLOCK_SIZE": 2**k,
                     },
                     num_warps=warp,
+                    num_stages=1,
                 )
             )
     return configs
 
 
-@triton.autotune(configs=get_configs(), key=["N"])
+@triton.autotune(configs=get_configs(), key=["N"], warmup=10, rep=30)
 @triton.jit
 def rms_norm_kernel(
     x_ptr,
