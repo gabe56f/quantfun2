@@ -69,8 +69,8 @@ def rms_norm_kernel(
         tl.store(output_row_ptr + cols * stride_output_col, output_val, mask=mask)
 
 
-def apply_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
-    output = torch.empty_like(x)
+def apply_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    output = torch.empty_like(x, memory_format=torch.contiguous_format)
     dim = weight.shape[0]
 
     x_2d = x.contiguous().view(-1, dim)

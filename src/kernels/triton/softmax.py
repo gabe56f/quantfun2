@@ -76,7 +76,7 @@ def softmax_kernel(
 
         exp_x = tl.exp(x - row_max[:, None])
         normalized = exp_x / row_sum[:, None]
-        tl.store(ptrs, normalized.to(tl.bfloat16), mask=valid_h[:, None] & mask[None, :])
+        tl.store(ptrs, normalized.to(x_ptr.Out.elem_ty), mask=valid_h[:, None] & mask[None, :])
 
 
 def inplace_tiled_softmax(x: torch.Tensor):

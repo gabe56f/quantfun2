@@ -39,7 +39,7 @@ class TimestepEmbedder(nn.Module):
         timestep_frequencies = self.timestep_embedding(
             t, self.frequency_embeddings_size
         )
-        timestep_frequencies = timestep_frequencies.to(torch.bfloat16)
+        timestep_frequencies = timestep_frequencies.to(torch.float16)
         # timestep_frequencies = timestep_frequencies.to(self.mlp[0].weight.dtype)
         return self.mlp(timestep_frequencies)
 

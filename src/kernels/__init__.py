@@ -1,35 +1,9 @@
+import math
+
 import torch
 import numpy as np
 
 from .module import implemented_as, get_source_module
-
-
-def _apply_ffn_forward_triton(
-    x: torch.Tensor,
-    c: torch.Tensor,
-    adaLN_weight: torch.Tensor,
-    adaLN_bias: torch.Tensor,
-    linear_weight: torch.Tensor,
-    linear_bias: torch.Tensor,
-    bias: bool,
-    hidden_size: int,
-    num_patches: int,
-    out_channels: int,
-) -> torch.Tensor:
-    from .triton.ffn import ffn_forward as ffn_forward_triton
-
-    return ffn_forward_triton(
-        x,
-        c,
-        adaLN_weight,
-        adaLN_bias,
-        linear_weight,
-        linear_bias,
-        bias,
-        hidden_size,
-        num_patches,
-        out_channels,
-    )
 
 
 def _apply_rope_triton(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor):
@@ -166,3 +140,56 @@ def rope_apply(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor):
     xk_out = torch.view_as_real(xk_out).flatten(-2)
 
     return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+# @implemented_as(triton_func=_apply_topk_fa_attn_triton)
+def topk_attn(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    xv: torch.Tensor,
+    mask: torch.BoolTensor,
+    fn: callable,
+    HEAD_DIM: int,
+    scale: float = None,
+    TOP_K: int = 256,
+    POS_DICT: torch.BoolTensor = None,
+    N_HEADS: int = 32,
+    N_KV_HEADS: int = 8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    n_rep = N_HEADS // N_KV_HEADS
+    if n_rep >= 1:
+        xk = xk.unsqueeze_(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+        xv = xv.unsqueeze_(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+
+    # xq, xk, xv: [batch_size, n_queries, n_heads, head_dim]
+    # -> x_: [batch_size, n_heads, n_queries, head_dim]
+    xq.transpose_(1, 2)
+    xk.transpose_(1, 2)
+    xv.transpose_(1, 2)
+
+    if scale is None:
+        scale = 1.0 / math.sqrt(HEAD_DIM)
+
+    torch.matmul(xq, xk.transpose_(2, 3), out=xq)
+    xq *= scale
+
+    if mask is not None:
+        xq += fn(mask)[:, :, :, : xq.shape[-2]]
+
+    if POS_DICT is None:
+        last_dim_size = xq.size(-1)
+        token_budget = min(last_dim_size, TOP_K)
+        _, top_k_indices = torch.topk(xq, token_budget, sorted=False)
+        POS_DICT = torch.zeros_like(xq, dtype=torch.bool).scatter_(
+            -1, top_k_indices, True
+        )
+    else:
+        min_val = torch.finfo(xq.dtype).min
+        xq.masked_fill_(~POS_DICT.to(xq.device), min_val)
+
+    xq = inplace_softmax(xq, -1)
+
+    torch.matmul(xq, xv, out=xq)
+    xq.transpose_(1, 2)
+
+    return xq, POS_DICT

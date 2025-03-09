@@ -109,7 +109,6 @@ class OneDiffusionPipeline(Pipelinelike):
                         file,
                         device=device,
                         quantization_device=quantization_device,
-                        torch_dtype=torch_dtype,
                         dtype=dtype,
                     )
             else:

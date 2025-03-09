@@ -107,15 +107,13 @@ class LuminaImageTwoPipeline(Pipelinelike):
                     transformer.load_state_dict(state_dict, assign=True, strict=True)
                     transformer.to(dtype=torch_dtype, device=device)
                 else:
-                    torch_dtype = torch.bfloat16
                     dtype = datatype
-                    print(LuminaDiT.get_replace_map())
+                    # print(LuminaDiT.get_replace_map())
                     transformer = cls.create_quantized_model_from_safetensors(
                         transformer,
                         file,
                         device=device,
                         quantization_device=quantization_device,
-                        torch_dtype=torch_dtype,
                         dtype=dtype,
                         replace_map=LuminaDiT.get_replace_map(),
                     )
@@ -128,10 +126,8 @@ class LuminaImageTwoPipeline(Pipelinelike):
             if isinstance(datatype, torch.dtype):
                 text_encoder.to(dtype=datatype)
             else:
-                torch_dtype = torch.bfloat16
                 dtype = datatype
 
-                text_encoder.to(dtype=torch_dtype)
                 text_encoder = quantize_model(
                     text_encoder,
                     dtype,
@@ -160,7 +156,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
     def prompt(
         self, prompts: Prompts, images_per_prompt: int = 1
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        device = self.text_encoder.device
+        device = self.device
 
         if isinstance(prompts, str):
             prompts = [prompts]
@@ -222,8 +218,8 @@ class LuminaImageTwoPipeline(Pipelinelike):
             attention_mask = torch.cat([uncond_attention_mask, attention_mask], dim=0)
 
         return (
-            prompt_embeds.to(self.text_encoder.dtype),
-            attention_mask.to(self.text_encoder.dtype),
+            prompt_embeds.to(device, self.dtype),
+            attention_mask.to(device, self.dtype),
             len(negative) > 0,
             bsz,
         )

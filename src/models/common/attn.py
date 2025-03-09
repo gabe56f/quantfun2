@@ -6,16 +6,17 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from ...kernels import rope_apply, inplace_softmax
+from ...kernels import rope_apply, topk_attn
 from .rmsnorm import RMSNorm
 from ...misc.padding import pad_input, _upad_input
 
-ATTN: Literal["sdpa", "flash", "sage", "flash-int8"] = "flash"
-TOP_K: int = 256
+ATTN: Literal["sdpa", "flash", "sage"] = "flash"
+TOP_K: int = 512
 SPARSE_ATTENTION_START: float = 0.0
 SPARSE_ATTENTION_RECOMPUTE: float = 0.0
 SPARSE_ATTENTION_END: float = 0.0
 POS_DICT = None
+i = 0
 
 
 @torch.no_grad()
@@ -26,6 +27,7 @@ def _dropout(
     xv: torch.Tensor,
     mask: torch.BoolTensor,
     apply_fn: callable,
+    scale: float,
 ) -> tuple[bool, torch.Tensor]:
     global POS_DICT
     # from time import time
@@ -35,132 +37,21 @@ def _dropout(
         if attn.dropout_start or attn.dropout_recompute:
             POS_DICT = None
 
-        from ...kernels.triton.sparse_attn import topk_attn_flash_hybrid
-
-        attn_weights, POS_DICT = topk_attn_flash_hybrid(
-            attn,
+        attn_weights, POS_DICT = topk_attn(
             xq,
             xk,
             xv,
             mask,
             apply_fn,
             attn.head_dim,
-            xq.shape[1],
-            None,
+            scale,
             TOP_K,
             POS_DICT,
             attn.n_heads,
             attn.n_kv_heads,
         )
-
-        # from ...kernels.sparse_attn import topk_attn_triton
-
-        # attn_weights, POS_DICT = topk_attn_triton(
-        #     xq,
-        #     xk,
-        #     xv,
-        #     apply_fn(mask),
-        #     attn.head_dim,
-        #     None,
-        #     TOP_K,
-        #     POS_DICT,
-        #     attn.n_heads,
-        #     attn.n_kv_heads,
-        # )
         return False, attn_weights
     return True, None
-
-
-def topk_attn(
-    attn: "Attention",
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    xv: torch.Tensor,
-    mask: torch.BoolTensor,
-    fn: callable,
-    HEAD_DIM: int,
-    seq_len: int,
-    scale: float = None,
-    TOP_K: int = 256,
-    POS_DICT: torch.BoolTensor = None,
-    N_HEADS: int = 32,
-    N_KV_HEADS: int = 8,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if POS_DICT is None:
-        n_rep = N_HEADS // N_KV_HEADS
-        if n_rep >= 1:
-            xk = xk.unsqueeze_(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-            xv = xv.unsqueeze_(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-
-        # xq, xk, xv: [batch_size, n_queries, n_heads, head_dim]
-        # -> x_: [batch_size, n_heads, n_queries, head_dim]
-        xq.transpose_(1, 2)
-        xk.transpose_(1, 2)
-        xv.transpose_(1, 2)
-
-        if scale is None:
-            scale = 1.0 / math.sqrt(HEAD_DIM)
-
-        torch.matmul(xq, xk.transpose_(2, 3), out=xq)
-        xq *= scale
-
-        if mask is not None:
-            xq += fn(mask)[:, :, :, : xq.shape[-2]]
-
-        last_dim_size = xq.size(-1)
-        token_budget = min(last_dim_size, TOP_K)
-        _, top_k_indices = torch.topk(xq, token_budget, sorted=False)
-        POS_DICT = torch.zeros(
-            xq.shape[0], xq.shape[2], dtype=torch.bool, device=xq.device
-        ).scatter_(-1, top_k_indices[:, 0, :, 0].squeeze(), True)
-        # min_val = torch.finfo(xq.dtype).min
-        # xq.masked_fill_(~POS_DICT.to(xq.device), min_val)
-
-        xq = inplace_softmax(xq)
-
-        torch.matmul(xq, xv, out=xq)
-        xq.transpose_(1, 2)
-    else:
-        bsz, *_ = xq.shape
-        from flash_attn import flash_attn_varlen_func
-        from ...misc.padding import _upad_input, pad_input
-
-        (
-            query_states,
-            key_states,
-            value_states,
-            indices_q,
-            cu_seq_lens,
-            max_seq_lens,
-        ) = _upad_input(
-            attn,
-            xq,
-            xk,
-            xv,
-            mask.to(torch.bool) & POS_DICT,
-            seq_len,
-        )
-
-        cu_seqlens_q, cu_seqlens_k = cu_seq_lens
-        max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
-
-        attn_output_unpad = flash_attn_varlen_func(
-            query_states,
-            key_states,
-            value_states,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_in_batch_q,
-            max_seqlen_k=max_seqlen_in_batch_k,
-            dropout_p=0.0,
-            causal=False,
-            softmax_scale=scale,
-            # softcap=30,
-        )
-
-        xq = pad_input(attn_output_unpad, indices_q, bsz, seq_len)
-
-    return xq, POS_DICT
 
 
 def _do_attn(
@@ -174,7 +65,9 @@ def _do_attn(
     seq_len: int,
     softmax_scale: float = None,
 ) -> torch.Tensor:
-    NEED_COMPUTE, attn_output = _dropout(attn, xq, xk, xv, attn_mask, apply_fn)
+    NEED_COMPUTE, attn_output = _dropout(
+        attn, xq, xk, xv, attn_mask, apply_fn, softmax_scale
+    )
 
     if not NEED_COMPUTE:
         return attn_output
@@ -209,19 +102,6 @@ def _do_attn(
                 causal=False,
                 softmax_scale=softmax_scale,
                 # softcap=30,
-            )
-        elif ATTN == "flash-int8":
-            from ...kernels.fa import _Attention
-
-            attn_output_unpad = _Attention.apply(
-                query_states,
-                key_states,
-                value_states,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_in_batch_q,
-                max_seqlen_in_batch_k,
-                softmax_scale,
             )
         else:
             from sageattention import sageattn_varlen
@@ -310,6 +190,9 @@ class JointAttention(nn.Module):
         # from time import time
 
         # t0 = time()
+        rbsz, _ = x_mask.shape
+        if x.dim() == 2:
+            x = x.view(rbsz, x.shape[0] // rbsz, -1).contiguous()
         bsz, seqlen, _ = x.shape
         # print(f"JointAttention {x.shape}")
 

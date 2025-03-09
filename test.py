@@ -16,8 +16,14 @@ with torch.inference_mode():
     pipeline = pipeclass.from_pretrained(
         model_path,
         dtype={
-            "transformer": torch.bfloat16,  # partial(q.qfloatx, 3, 2),  # fp6 (sign+3+2)
-            "text_encoder": partial(q.qint8),  # int8
+            "transformer": partial(
+                q.q_block_sparse,
+                layout="default",
+            ),  # partial(q.qfloatx, 3, 2),  # fp6 (sign+3+2)
+            "text_encoder": torch.float16,
+            # partial(
+            #     q.qint4, group_size=128, layout="marlin-sparse"
+            # ),  # int8
         },
         device="cpu",
     )
@@ -30,6 +36,7 @@ with torch.inference_mode():
 
     pipeline.offload = True
     pipeline.device = torch.device("cuda:0")
+    pipeline.dtype = torch.float16
     torch.cuda.empty_cache()
     # pipeline.to("cuda:0")
 

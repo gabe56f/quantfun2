@@ -335,7 +335,6 @@ class Pipelinelike:
         safetensors_file: Path,
         device: torch.device = "cpu",
         quantization_device: torch.device = "cuda",
-        torch_dtype: torch.dtype = torch.bfloat16,
         dtype: qdtype = None,
         replace_map: Optional[Dict[str, str]] = None,
     ) -> T:
@@ -344,8 +343,8 @@ class Pipelinelike:
         if replace_map is None:
             replace_map = {}
 
+        dtype, torch_dtype = dtype()
         meta_model.to(dtype=torch_dtype)
-        dtype = dtype()
 
         with safe_open(safetensors_file, framework="pt") as f:
 
