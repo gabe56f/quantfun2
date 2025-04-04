@@ -192,3 +192,54 @@ class MimicCFG(Guidance):
         actual_res = result.unflatten(2, mimic_target.shape[2:])
         actual_res = actual_res * 0.7 + cfg_target * 0.3
         return actual_res
+
+
+class CFGZero(Guidance):
+    disable: bool = False
+    scale: float = 1.0
+
+    def setup(self, steps: int, scale: float, disable: bool = False) -> Guidance:
+        self.disable = disable
+        self.scale = scale
+
+        return self
+
+    def _optimize_scale(
+        self, flat_cond: torch.Tensor, flat_uncond: torch.Tensor
+    ) -> torch.Tensor:
+        dot_product = torch.sum(flat_cond * flat_uncond, dim=1, keepdim=True)
+        squared_norm = torch.sum(flat_uncond**2, dim=1, keepdim=True) + 1e-8
+        return dot_product / squared_norm
+
+    def _cfg(self, cond: torch.Tensor, uncond: torch.Tensor) -> torch.Tensor:
+        return uncond + self.scale * (cond - uncond)
+
+    def __call__(
+        self,
+        x0: torch.Tensor,
+        conds: torch.Tensor,
+        timestep: torch.LongTensor,
+        step: int,
+    ) -> torch.Tensor:
+        if self.disable:
+            return conds
+
+        noise_pred_uncond, noise_pred_cond = conds.chunk(2)
+        bs = noise_pred_uncond.shape[0]
+
+        flat_cond = noise_pred_cond.view(bs, -1)
+        flat_uncond = noise_pred_uncond.view(bs, -1)
+
+        alpha = self._optimize_scale(flat_cond, flat_uncond)
+        alpha = alpha.view(bs, *([1] * (len(noise_pred_cond.shape) - 1)))
+        alpha = alpha.to(noise_pred_cond.dtype)
+
+        return self._cfg(noise_pred_cond, noise_pred_uncond * alpha)
+
+
+CFGS = {
+    "cfg": CFG,
+    "cfgzero": CFGZero,
+    "mimic": MimicCFG,
+    "apg": APG,
+}

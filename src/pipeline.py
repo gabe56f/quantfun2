@@ -181,21 +181,18 @@ class Pipelinelike:
         ]
         if __name == "cfg":
             if isinstance(__value, str):
-                from .misc.guidance import CFG, APG, MimicCFG
+                from .misc.guidance import CFGS
 
                 value = __value.lower()
                 if value == "disable":
                     self.cfg.disable = True
                 elif value == "enable":
                     self.cfg.disable = False
-                elif value == "cfg":
-                    super().__setattr__("cfg", CFG())
-                elif value == "apg":
-                    super().__setattr__("cfg", APG())
-                elif value == "mimic":
-                    super().__setattr__("cfg", MimicCFG())
                 else:
-                    raise ValueError(f"Invalid value for cfg: {__value}")
+                    cl = CFGS.get(value, None)
+                    if cl is None:
+                        raise ValueError(f"Invalid value for cfg: {__value}")
+                    super().__setattr__("cfg", cl())
             else:
                 super().__setattr__("cfg", __value)
             return

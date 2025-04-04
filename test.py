@@ -3,30 +3,38 @@ from functools import partial
 import torch
 
 import src.quant as q
-from src.models import OneDiffusionPipeline
-from src.models.lumina.image_two.pipeline import LuminaImageTwoPipeline
+from src.models.flux.pipeline import LuminaImageTwoPipeline
+from src.models.flux.mmdit import FluxTransformer2D
 
 model_path = "../lumina-image-2.0-bf16-diffusers/"
 
 with torch.inference_mode():
-    if True:
-        pipeclass = LuminaImageTwoPipeline
-    else:
-        pipeclass = OneDiffusionPipeline
-    pipeline = pipeclass.from_pretrained(
-        model_path,
-        dtype={
-            "transformer": partial(
-                q.q_block_sparse,
-                layout="default",
-            ),  # partial(q.qfloatx, 3, 2),  # fp6 (sign+3+2)
-            "text_encoder": torch.float16,
-            # partial(
-            #     q.qint4, group_size=128, layout="marlin-sparse"
-            # ),  # int8
-        },
-        device="cpu",
+    with torch.device("meta"):
+        transformer = FluxTransformer2D(
+            16, 16, 16, [16], 1.0, 15, 15, 15, None, None, 256
+        )
+        text_encoder = None
+        vae = None
+
+    transformer = LuminaImageTwoPipeline.create_quantized_model_from_gguf(
+        transformer, "chroma.gguf", override_dtype=False
     )
+    text_encoder = LuminaImageTwoPipeline.create_quantized_model_from_gguf(
+        text_encoder, "t5-xxl.gguf", override_dtype=False
+    )
+    vae = LuminaImageTwoPipeline.create_quantized_model_from_safetensors(
+        vae, "vae.safetensors", dtype=torch.bfloat16
+    )
+
+    pipeline = LuminaImageTwoPipeline(
+        transformer=transformer,
+        scheduler=None,
+        vae=vae,
+        text_encoder=text_encoder,
+        tokenizer=None,
+    )
+
+    pipeline.to("cpu")
 
     # print(
     #     NextDiT.from_pretrained(
