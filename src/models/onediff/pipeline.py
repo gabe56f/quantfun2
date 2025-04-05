@@ -23,8 +23,7 @@ from ...pipeline import (
     Pipelinelike,
     Prompts,
     Pseudorandom,
-    Schedulerlike,
-    calculate_shift,
+    Sampler,
     requires,
     retrieve_timesteps,
 )
@@ -39,7 +38,7 @@ class OneDiffusionPipeline(Pipelinelike):
         vae: AutoencoderKL,
         text_encoder: T5EncoderModel,
         tokenizer: T5Tokenizer,
-        scheduler: Schedulerlike,
+        scheduler: Sampler,
     ) -> None:
         super().__init__()
 
@@ -497,22 +496,9 @@ class OneDiffusionPipeline(Pipelinelike):
                 / self.transformer.config.patch_size[-1]
                 / self.transformer.config.patch_size[-2]
             )
-        sigmas = np.linspace(1.0, 1 / steps, steps)
-        if self.can_mu:
-            mu = calculate_shift(
-                image_seq_len,
-                self.scheduler.config.base_image_seq_len,
-                self.scheduler.config.max_image_seq_len,
-                self.scheduler.config.base_shift,
-                self.scheduler.config.max_shift,
-            )
-            timesteps, steps = retrieve_timesteps(
-                self.scheduler, steps, self.device, sigmas=sigmas, mu=mu
-            )
-        else:
-            timesteps, steps = retrieve_timesteps(
-                self.scheduler, steps, self.device, sigmas=sigmas
-            )
+        timesteps, steps = retrieve_timesteps(
+            self.scheduler, steps, self.device, image_seq_len=image_seq_len
+        )
 
         if image_settings.multiview:
             cond_indices_images, cond_indices_rays, cond_rays = (

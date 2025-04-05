@@ -18,19 +18,18 @@ from ...pipeline import (
     Pipelinelike,
     Prompts,
     Pseudorandom,
-    Schedulerlike,
-    calculate_shift,
     requires,
     retrieve_timesteps,
+    Sampler,
 )
 from ...quant import quantize_model
 
 
-class LuminaImageTwoPipeline(Pipelinelike):
+class FluxPipeline(Pipelinelike):
     def __init__(
         self,
         transformer: FluxTransformer2D,
-        scheduler: Schedulerlike,
+        scheduler: Sampler,
         vae: AutoencoderKL,
         text_encoder: T5EncoderModel,
         tokenizer: T5Tokenizer,
@@ -307,22 +306,9 @@ class LuminaImageTwoPipeline(Pipelinelike):
             latents,
         )
 
-        sigmas = np.linspace(1.0, 1 / steps, steps)
-        if self.can_mu:
-            mu = calculate_shift(
-                latents.shape[1],
-                self.scheduler.config.get("base_image_seq_len", 256),
-                self.scheduler.config.get("max_image_seq_len", 4096),
-                self.scheduler.config.get("base_shift", 0.5),
-                self.scheduler.config.get("max_shift", 1.15),
-            )
-            timesteps, steps = retrieve_timesteps(
-                self.scheduler, steps, self.device, sigmas=sigmas, mu=mu
-            )
-        else:
-            timesteps, steps = retrieve_timesteps(
-                self.scheduler, steps, self.device, sigmas=sigmas
-            )
+        timesteps, steps = retrieve_timesteps(
+            self.scheduler, steps, self.device, image_seq_len=latents.shape[1]
+        )
 
         for i, t in tqdm(enumerate(timesteps), total=steps):
             latents_input = torch.cat([latents] * 2) if do_cfg else latents

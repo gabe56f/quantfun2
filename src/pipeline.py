@@ -7,6 +7,7 @@ from PIL import Image
 
 from . import quant as q
 from .quant import qdtype, quantize_model, _nil
+from .misc.scheduling import Sampler
 
 if TYPE_CHECKING:
     from gguf import GGUFReader
@@ -143,20 +144,6 @@ class Guidance(Protocol):
         timestep: torch.LongTensor,
         step: int,
     ) -> torch.Tensor: ...
-
-
-class Schedulerlike(Protocol):
-    timesteps: torch.Tensor
-    init_noise_sigma: torch.Tensor
-
-    def set_timesteps(self, num_inference_steps: int, device: torch.device): ...
-
-    def step(
-        self,
-        model_output: torch.Tensor,
-        timestep: Union[float, torch.Tensor],
-        sample: torch.Tensor,
-    ) -> tuple: ...
 
 
 class Pipelinelike:
@@ -531,31 +518,12 @@ def requires(load: str):
     return decorator
 
 
-def calculate_shift(
-    image_seq_len: int,
-    base_seq_len: int = 256,
-    max_seq_len: int = 4096,
-    base_shift: float = 0.5,
-    max_shift: float = 1.16,
-) -> float:
-    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-    b = base_shift - m * base_seq_len
-    mu = image_seq_len * m + b
-
-    return mu
-
-
 def retrieve_timesteps(
-    scheduler: Schedulerlike,
+    sampler: Sampler,
     num_inference_steps: int,
     device: Optional[torch.device] = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, int]:
-    extra_kwargs = {}
-    for k, v in kwargs.items():
-        if k in set(inspect.signature(scheduler.set_timesteps).parameters.keys()):
-            extra_kwargs[k] = v
+    sampler.init_timesteps(num_inference_steps, device, **kwargs)
 
-    scheduler.set_timesteps(num_inference_steps, device, **extra_kwargs)
-
-    return scheduler.timesteps, num_inference_steps
+    return sampler.timesteps, sampler.num_inference_steps

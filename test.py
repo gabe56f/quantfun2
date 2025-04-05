@@ -3,7 +3,7 @@ from functools import partial
 import torch
 
 import src.quant as q
-from src.models.flux.pipeline import LuminaImageTwoPipeline
+from src.models.flux.pipeline import FluxPipeline
 from src.models.flux.mmdit import FluxTransformer2D
 
 model_path = "../lumina-image-2.0-bf16-diffusers/"
@@ -16,17 +16,17 @@ with torch.inference_mode():
         text_encoder = None
         vae = None
 
-    transformer = LuminaImageTwoPipeline.create_quantized_model_from_gguf(
+    transformer = FluxPipeline.create_quantized_model_from_gguf(
         transformer, "chroma.gguf", override_dtype=False
     )
-    text_encoder = LuminaImageTwoPipeline.create_quantized_model_from_gguf(
+    text_encoder = FluxPipeline.create_quantized_model_from_gguf(
         text_encoder, "t5-xxl.gguf", override_dtype=False
     )
-    vae = LuminaImageTwoPipeline.create_quantized_model_from_safetensors(
+    vae = FluxPipeline.create_quantized_model_from_safetensors(
         vae, "vae.safetensors", dtype=torch.bfloat16
     )
 
-    pipeline = LuminaImageTwoPipeline(
+    pipeline = FluxPipeline(
         transformer=transformer,
         scheduler=None,
         vae=vae,
