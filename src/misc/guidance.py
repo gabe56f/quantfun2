@@ -205,11 +205,18 @@ class CFGZero(Guidance):
         return self
 
     def _optimize_scale(
-        self, flat_cond: torch.Tensor, flat_uncond: torch.Tensor
+        self, noise_pred_cond: torch.Tensor, noise_pred_uncond: torch.Tensor
     ) -> torch.Tensor:
+        bs = noise_pred_uncond.shape[0]
+        flat_cond = noise_pred_cond.view(bs, -1).to(torch.float32)
+        flat_uncond = noise_pred_uncond.view(bs, -1).to(torch.float32)
+
         dot_product = torch.sum(flat_cond * flat_uncond, dim=1, keepdim=True)
-        squared_norm = torch.sum(flat_uncond**2, dim=1, keepdim=True) + 1e-8
-        return dot_product / squared_norm
+        squared_norm = torch.sum(flat_uncond.square_(), dim=1, keepdim=True) + 1e-8
+        dot_product /= squared_norm
+
+        dot_product = dot_product.reshape([bs] + [1] * (noise_pred_cond.ndim - 1))
+        return dot_product.to(noise_pred_cond.dtype)
 
     def _cfg(self, cond: torch.Tensor, uncond: torch.Tensor) -> torch.Tensor:
         return uncond + self.scale * (cond - uncond)
@@ -225,16 +232,54 @@ class CFGZero(Guidance):
             return conds
 
         noise_pred_uncond, noise_pred_cond = conds.chunk(2)
-        bs = noise_pred_uncond.shape[0]
+        diff_uncond, diff_cond = (x0 - conds).chunk(2)
 
-        flat_cond = noise_pred_cond.view(bs, -1)
-        flat_uncond = noise_pred_uncond.view(bs, -1)
+        cfg = self._cfg(noise_pred_cond, noise_pred_uncond)
+        alpha = self._optimize_scale(diff_cond, diff_uncond)
+        alpha = (1.0 - alpha) * (self.scale - 1.0)
+        correction = noise_pred_uncond * alpha
 
-        alpha = self._optimize_scale(flat_cond, flat_uncond)
-        alpha = alpha.view(bs, *([1] * (len(noise_pred_cond.shape) - 1)))
-        alpha = alpha.to(noise_pred_cond.dtype)
+        return cfg + correction
 
-        return self._cfg(noise_pred_cond, noise_pred_uncond * alpha)
+
+class Mahiro(Guidance):
+    disable: bool = False
+    scale: float = 1.0
+
+    def setup(self, steps: int, scale: float, disable: bool = False) -> Guidance:
+        self.disable = disable
+        self.scale = scale
+
+        return self
+
+    def _cfg(self, cond: torch.Tensor, uncond: torch.Tensor) -> torch.Tensor:
+        return uncond + self.scale * (cond - uncond)
+
+    def __call__(
+        self,
+        x0: torch.Tensor,
+        conds: torch.Tensor,
+        timestep: torch.LongTensor,
+        step: int,
+    ) -> torch.Tensor:
+        if self.disable:
+            return conds
+
+        noise_pred_uncond, noise_pred_cond = conds.chunk(2)
+
+        cond_leap = noise_pred_cond * self.scale
+        cfg = self._cfg(noise_pred_cond, noise_pred_uncond)
+        merge = cond_leap + cfg / 2.0
+
+        norm_uncond = (
+            torch.sqrt((noise_pred_uncond * self.scale).abs())
+            * noise_pred_uncond.sign()
+        )
+        norm_merge = torch.sqrt(merge.abs()) * merge.sign()
+        sim = torch.nn.functional.cosine_similarity(norm_uncond, norm_merge).mean()
+        alpha = (sim + 1.0) / 2.0
+
+        return torch.lerp(cond_leap, cfg, alpha)
 
 
 CFGS = {
@@ -242,4 +287,5 @@ CFGS = {
     "cfgzero": CFGZero,
     "mimic": MimicCFG,
     "apg": APG,
+    "mahiro": Mahiro,
 }

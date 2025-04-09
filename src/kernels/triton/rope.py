@@ -84,7 +84,8 @@ def rope_triton(
     xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Ensure it is complex
-    freqs_cis = torch.view_as_complex(freqs_cis)
+    if not freqs_cis.is_complex():
+        freqs_cis = torch.view_as_complex(freqs_cis)
 
     # Extract cos and sin from freqs_cis
     cos_theta = freqs_cis.real.contiguous().half()

@@ -44,7 +44,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
     def __init__(
         self,
         transformer: LuminaDiT,
-        scheduler: Sampler,
+        sampler: Sampler,
         vae: AutoencoderKL,
         text_encoder: Gemma2ForCausalLM,
         tokenizer: GemmaTokenizer,
@@ -55,7 +55,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
         self.vae = vae
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
-        self.scheduler = scheduler
+        self.sampler = sampler
 
         self.offload = False
         self.device = torch.device("cuda:0")
@@ -134,7 +134,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
                     quantization_device=quantization_device,
                 )
             tokenizer = GemmaTokenizer.from_pretrained(file_or_folder / "tokenizer")
-            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            sampler = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 file_or_folder / "scheduler"
             )
 
@@ -145,7 +145,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
             vae = AutoencoderKL.from_pretrained(file_or_folder / "vae").to(
                 dtype=torch_dtype
             )
-            ret = cls(transformer, scheduler, vae, text_encoder, tokenizer)
+            ret = cls(transformer, sampler, vae, text_encoder, tokenizer)
             ret.to(device=device)
             return ret
         else:
@@ -254,8 +254,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
         else:
             latents = latents.to(dtype=self.dtype)
 
-        if hasattr(self.scheduler, "init_noise_sigma"):
-            latents = latents * self.scheduler.init_noise_sigma
+        latents = self.sampler.scale_noise(latents)
 
         return latents
 
@@ -303,7 +302,6 @@ class LuminaImageTwoPipeline(Pipelinelike):
             generator = seed
 
         height, width = size
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator=generator, eta=eta)
         encoder_hidden_states, encoder_attention_mask, do_cfg, batch_size = self.prompt(
             prompts, images_per_prompt
         )
@@ -321,7 +319,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
         )
 
         timesteps, steps = retrieve_timesteps(
-            self.scheduler, steps, self.device, image_seq_len=latents.shape[1]
+            self.sampler, steps, self.device, image_seq_len=latents.shape[1]
         )
 
         for i, t in tqdm(enumerate(timesteps), total=steps):
@@ -333,7 +331,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
                 curr_t = curr_t[None].to(self.device)
 
             curr_t = curr_t.expand(latents_input.shape[0])
-            curr_t = 1 - curr_t / self.scheduler.config.num_train_timesteps
+            curr_t = 1 - curr_t / self.sampler.num_train_timesteps
 
             noise_pred = self.transformer(
                 x=latents_input,
@@ -342,11 +340,8 @@ class LuminaImageTwoPipeline(Pipelinelike):
                 cap_mask=encoder_attention_mask,
             )
 
-            noise_pred = self.cfg(latents_input, noise_pred, t, i)
-            noise_pred = -noise_pred
-            latents = self.scheduler.step(
-                noise_pred, t, latents, **extra_step_kwargs
-            ).prev_sample
+            noise_pred = -self.cfg(latents_input, noise_pred, t, i)
+            latents = self.sampler.step(noise_pred, t, latents)
 
         images = self.decode_image(latents, *size)
         images = self.postprocessors(images, *size)

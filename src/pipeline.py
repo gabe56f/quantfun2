@@ -7,7 +7,7 @@ from PIL import Image
 
 from . import quant as q
 from .quant import qdtype, quantize_model, _nil
-from .misc.scheduling import Sampler
+from .misc.scheduling import Sampler, SAMPLERS
 
 if TYPE_CHECKING:
     from gguf import GGUFReader
@@ -147,12 +147,21 @@ class Guidance(Protocol):
 
 
 class Pipelinelike:
+    models: Dict[str, torch.nn.Module]
+
+    device: torch.device
+    dtype: torch.dtype
+    offload: bool
+
+    sampler: Sampler
+    cfg: "Guidance"
+    postprocessors: Postprocessors
+
     def __init__(self) -> None:
         from .misc.guidance import CFG
 
         super().__setattr__("models", {})
-        super().__setattr__("scheduler", None)
-        super().__setattr__("can_mu", True)
+        super().__setattr__("sampler", None)
         super().__setattr__("device", torch.device("cpu"))
         super().__setattr__("dtype", torch.bfloat16)
         super().__setattr__("offload", False)
@@ -183,32 +192,12 @@ class Pipelinelike:
             else:
                 super().__setattr__("cfg", __value)
             return
-        elif __name == "scheduler":
+        elif __name == "sampler":
             if isinstance(__value, str):
                 value = __value.lower()
-                val = None
-                if value == "euler":
-                    from diffusers import FlowMatchEulerDiscreteScheduler
-
-                    val = FlowMatchEulerDiscreteScheduler(
-                        shift=3.0, use_dynamic_shifting=True
-                    )
-                elif value == "heun":
-                    from diffusers import FlowMatchHeunDiscreteScheduler
-
-                    val = FlowMatchHeunDiscreteScheduler(shift=3.0)
-                elif value == "sasolver":
-                    from diffusers import SASolverScheduler
-
-                    val = SASolverScheduler()
-                super().__setattr__("scheduler", val)
+                super().__setattr__("sampler", SAMPLERS.get(value, SAMPLERS["euler"])())
             else:
-                super().__setattr__("scheduler", __value)
-            super().__setattr__(
-                "can_mu",
-                "mu"
-                in inspect.signature(self.scheduler.set_timesteps).parameters.keys(),
-            )
+                super().__setattr__("sampler", __value)
             return
         if __name not in skip_models and hasattr(__value, "to"):
             self.models[__name] = __value
@@ -486,18 +475,6 @@ class Pipelinelike:
         noise_scale: float = 1.0,
         latents: torch.Tensor = None,
     ) -> Images: ...
-
-    def prepare_extra_step_kwargs(self, **kwargs) -> Dict[str, any]:
-        # prepare extra kwargs for the scheduler step, since not all schedulers have the same signature
-        # eta (η) is only used with the DDIMScheduler, it will be ignored for other schedulers.
-        # eta corresponds to η in DDIM paper: https://arxiv.org/abs/2010.02502
-        # and should be between [0, 1]
-
-        extra_kwargs = {}
-        for k, v in kwargs.items():
-            if k in set(inspect.signature(self.scheduler.step).parameters.keys()):
-                extra_kwargs[k] = v
-        return extra_kwargs
 
 
 def requires(load: str):

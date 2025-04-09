@@ -1,14 +1,15 @@
-from typing import Literal
 import math
+from typing import Literal
 
 import einops
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from ...kernels import rope_apply, topk_attn
+from ...misc.padding import _upad_input, pad_input
 from .rmsnorm import RMSNorm
-from ...misc.padding import pad_input, _upad_input
 
 ATTN: Literal["sdpa", "flash", "sage"] = "flash"
 TOP_K: int = 512
@@ -124,6 +125,7 @@ def _do_attn(
         xv.permute(0, 2, 1, 3),
         attn_mask=apply_fn(attn_mask),
         scale=softmax_scale,
+        enable_gqa=True,
     ).permute(0, 2, 1, 3)
 
 
@@ -209,11 +211,11 @@ class JointAttention(nn.Module):
         xq, xk = rope_apply(xq, xk, freqs_cis)
 
         softmax_scale = math.sqrt(1 / self.head_dim)
-        if ATTN == "sdpa":
-            n_rep = self.n_heads // self.n_local_kv_heads
-            if n_rep >= 1:
-                xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-                xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+        # if ATTN == "sdpa":
+        #     n_rep = self.n_heads // self.n_local_kv_heads
+        #     if n_rep >= 1:
+        #         xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+        #         xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
         output = _do_attn(
             self,
             xq,

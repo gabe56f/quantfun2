@@ -38,7 +38,7 @@ class OneDiffusionPipeline(Pipelinelike):
         vae: AutoencoderKL,
         text_encoder: T5EncoderModel,
         tokenizer: T5Tokenizer,
-        scheduler: Sampler,
+        sampler: Sampler,
     ) -> None:
         super().__init__()
 
@@ -46,7 +46,7 @@ class OneDiffusionPipeline(Pipelinelike):
         self.vae = vae
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
-        self.scheduler = scheduler
+        self.sampler = sampler
 
         self.offload = False
         self.device = torch.device("cuda:0")
@@ -95,10 +95,34 @@ class OneDiffusionPipeline(Pipelinelike):
                 if isinstance(datatype, torch.dtype):
                     torch_dtype = datatype
 
-                    from safetensors.torch import load_model
+                    from safetensors import safe_open
 
-                    load_model(transformer, file, device=device)
                     transformer.to(dtype=torch_dtype)
+
+                    with safe_open(file, framework="pt") as f:
+
+                        def repl(
+                            model: torch.nn.Linear,
+                            cur_fqn: str = "",
+                        ):
+                            model.to_empty(device=device, recurse=False)
+                            for k, param in model.named_parameters():
+                                tensor_name = f"{cur_fqn}{k}"
+                                # print(f"loading {tensor_name}")
+                                try:
+                                    tensor = f.get_tensor(tensor_name)
+
+                                    param.module_load(tensor.to(dtype=torch_dtype))
+                                except:  # noqa
+                                    raise ValueError(f"failed to load {tensor_name}")
+                            else:
+                                for name, child in model.named_children():
+                                    new_child = repl(child, f"{cur_fqn}{name}.")
+                                    if new_child is not child:
+                                        setattr(model, name, new_child)
+                                return model
+
+                        repl(transformer, "")
                 else:
                     torch_dtype = torch.bfloat16
                     dtype = datatype
@@ -127,7 +151,7 @@ class OneDiffusionPipeline(Pipelinelike):
                 text_encoder = quantize_model(text_encoder, dtype, device=device)
 
             tokenizer = T5Tokenizer.from_pretrained(file_or_folder / "tokenizer")
-            scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            sampler = FlowMatchEulerDiscreteScheduler.from_pretrained(
                 file_or_folder / "scheduler"
             )
 
@@ -140,7 +164,7 @@ class OneDiffusionPipeline(Pipelinelike):
                 dtype=torch_dtype
             )
 
-            ret = cls(transformer, vae, text_encoder, tokenizer, scheduler)
+            ret = cls(transformer, vae, text_encoder, tokenizer, sampler)
             ret.to(device=device)
             return ret
         else:
@@ -250,8 +274,7 @@ class OneDiffusionPipeline(Pipelinelike):
         else:
             latents = latents.to(dtype=self.dtype, device=self.transformer.device)
 
-        if hasattr(self.scheduler, "init_noise_sigma"):
-            latents = latents * self.scheduler.init_noise_sigma
+        latents = self.sampler.scale_noise(latents)
 
         if image is None:
             return latents
@@ -447,7 +470,6 @@ class OneDiffusionPipeline(Pipelinelike):
         elif size is None:
             size = (1024, 1024)
 
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator=generator, eta=eta)
         encoder_hidden_states, encoder_attention_mask, do_cfg, batch_size = self.prompt(
             prompts, images_per_prompt
         )
@@ -497,7 +519,7 @@ class OneDiffusionPipeline(Pipelinelike):
                 / self.transformer.config.patch_size[-2]
             )
         timesteps, steps = retrieve_timesteps(
-            self.scheduler, steps, self.device, image_seq_len=image_seq_len
+            self.sampler, steps, self.device, image_seq_len=image_seq_len
         )
 
         if image_settings.multiview:
@@ -537,13 +559,13 @@ class OneDiffusionPipeline(Pipelinelike):
                     timestep = einops.rearrange(
                         timestep, "b (f n) c h w -> b f n c h w", n=2
                     )
-                    timestep[:, cond_indices_images, 0] = self.scheduler.timesteps[-1]
-                    timestep[:, cond_indices_rays, 1] = self.scheduler.timesteps[-1]
+                    timestep[:, cond_indices_images, 0] = self.sampler.timesteps[-1]
+                    timestep[:, cond_indices_rays, 1] = self.sampler.timesteps[-1]
                     timestep = einops.rearrange(
                         timestep, "b f n c h w -> b (f n) c h w"
                     )
                 else:
-                    timestep[:, cond_indices] = self.scheduler.timesteps[-1]
+                    timestep[:, cond_indices] = self.sampler.timesteps[-1]
             noise_pred = self.transformer(
                 samples=latent_model_input.to(self.dtype),
                 timesteps=timestep,
@@ -554,16 +576,12 @@ class OneDiffusionPipeline(Pipelinelike):
             noise_pred = self.cfg(latent_model_input, noise_pred, t, i)
 
             if cond_latents is None and not image_settings.multiview:
-                latents = self.scheduler.step(
-                    noise_pred, t, latents, **extra_step_kwargs
-                ).prev_sample
+                latents = self.sampler.step(noise_pred, t, latents)
             else:
                 bs, n_frame = noise_pred.shape[:2]
                 noise_pred = einops.rearrange(noise_pred, "b f c h w -> (b f) c h w")
                 latents = einops.rearrange(latents, "b f c h w -> (b f) c h w")
-                latents = self.scheduler.step(
-                    noise_pred, t, latents, **extra_step_kwargs
-                ).prev_sample
+                latents = self.sampler.step(noise_pred, t, latents)
                 latents = einops.rearrange(
                     latents, "(b f) c h w -> b f c h w", b=bs, f=n_frame
                 )

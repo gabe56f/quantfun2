@@ -3,44 +3,55 @@ from functools import partial
 import torch
 
 import src.quant as q
-from src.models.flux.pipeline import FluxPipeline
-from src.models.flux.mmdit import FluxTransformer2D
+
+# from src.models.flux.pipeline import FluxPipeline
+# from src.models.flux.mmdit import FluxTransformer2D
+# from src.models.onediff import OneDiffusionPipeline
+from src.models.lumina.image_two.pipeline import LuminaImageTwoPipeline
 
 model_path = "../lumina-image-2.0-bf16-diffusers/"
+# model_path = "./onediffusion/"
 
 with torch.inference_mode():
-    with torch.device("meta"):
-        transformer = FluxTransformer2D(
-            16, 16, 16, [16], 1.0, 15, 15, 15, None, None, 256
-        )
-        text_encoder = None
-        vae = None
+    # with torch.device("meta"):
+    #     transformer = FluxTransformer2D(
+    #         16, 16, 16, [16], 1.0, 15, 15, 15, None, None, 256
+    #     )
+    #     text_encoder = None
+    #     vae = None
 
-    transformer = FluxPipeline.create_quantized_model_from_gguf(
-        transformer, "chroma.gguf", override_dtype=False
-    )
-    text_encoder = FluxPipeline.create_quantized_model_from_gguf(
-        text_encoder, "t5-xxl.gguf", override_dtype=False
-    )
-    vae = FluxPipeline.create_quantized_model_from_safetensors(
-        vae, "vae.safetensors", dtype=torch.bfloat16
-    )
+    # transformer = FluxPipeline.create_quantized_model_from_gguf(
+    #     transformer, "chroma.gguf", override_dtype=False
+    # )
+    # text_encoder = FluxPipeline.create_quantized_model_from_gguf(
+    #     text_encoder, "t5-xxl.gguf", override_dtype=False
+    # )
+    # vae = FluxPipeline.create_quantized_model_from_safetensors(
+    #     vae, "vae.safetensors", dtype=torch.bfloat16
+    # )
 
-    pipeline = FluxPipeline(
-        transformer=transformer,
-        scheduler=None,
-        vae=vae,
-        text_encoder=text_encoder,
-        tokenizer=None,
-    )
+    # pipeline = FluxPipeline(
+    #     transformer=transformer,
+    #     scheduler=None,
+    #     vae=vae,
+    #     text_encoder=text_encoder,
+    #     tokenizer=None,
+    # )
 
-    pipeline.to("cpu")
+    # pipeline.to("cpu")
 
     # print(
     #     NextDiT.from_pretrained(
     #         model_path, subfolder="transformer", torch_dtype=torch.bfloat16
     #     ).x_embedder.weight.data.sum()
     # )
+    pipeline = LuminaImageTwoPipeline.from_pretrained(
+        model_path,
+        dtype=torch.float16,
+        #     "transformer": partial(q.qint8),
+        #     "text_encoder": partial(q.qint8),
+        # },
+    )
 
     pipeline.offload = True
     pipeline.device = torch.device("cuda:0")
@@ -50,11 +61,10 @@ with torch.inference_mode():
 
     # from PIL import Image
 
-    # pipeline.scheduler = "heun"
-
     # pipeline.postprocessors += "pixelize-contrast@128@8@4"
 
     def prompt(n: str) -> str:
+        # return n
         return f"You are an assistant designed to generate superior images with the superior degree of image-text alignment based on textual prompts or user prompts. <Prompt Start> {n}"
 
     # import torch.autograd.profiler as profiler
@@ -82,7 +92,7 @@ with torch.inference_mode():
             ],
             images_per_prompt=1,
             seed=seed,
-            steps=24,
+            steps=32,
             # image=Image.open("kopp.png"),
             size=(1024, 1024),
             cfg=scale,
@@ -108,5 +118,19 @@ with torch.inference_mode():
 
     # pipeline.compile()
 
-    for i in range(1, 11):
-        generate(f"retardation_{i}", "cfg", 4, i)
+    # pipeline.scheduler = "diffusers-test"
+
+    # for i in range(1, 6):
+    #     generate(f"test_{i}", "cfg", 4, i)
+
+    pipeline.sampler = "torchdiffeq"
+    pipeline.sampler.scheduler = "beta"
+
+    # for i in range(1, 6):
+    #     generate(f"cb_{i}", "cfg", 4, i)
+    for i in range(1, 3):
+        generate(f"0b_{i}", "cfgzero", 4, i)
+    # for i in range(1, 6):
+    #     generate(f"ab_{i}", "apg", 4, i)
+    # for i in range(1, 6):
+    #     generate(f"mb_{i}", "mahiro", 4, i)

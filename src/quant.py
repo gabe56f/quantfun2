@@ -128,14 +128,16 @@ class qdtype:
             return self.apply_function(*args, **kwargs), self.supported_dtypes[0]
 
 
-def linear_inserter(constructor, *, allow_requires_grad=False, **kwargs):
+def linear_inserter(constructor, *args, allow_requires_grad=False, **kwargs):
     def insert_subclass(lin, device=None, quant_device=None):
         requires_grad = allow_requires_grad and lin.weight.requires_grad
         if device is None:
             device = lin.weight.device
         if quant_device is None:
             quant_device = lin.weight.device
-        tensor = constructor(lin.weight.to(device=quant_device), **kwargs).to(device)
+        tensor = constructor(lin.weight.to(device=quant_device), *args, **kwargs).to(
+            device
+        )
         lin.weight = torch.nn.Parameter(
             tensor,
             requires_grad=requires_grad,
