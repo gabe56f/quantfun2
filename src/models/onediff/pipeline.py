@@ -2,7 +2,6 @@ from pathlib import Path as _Path
 from typing import List, Optional, Tuple, Union, Dict
 
 import einops
-import numpy as np
 import torch
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
@@ -25,7 +24,6 @@ from ...pipeline import (
     Pseudorandom,
     Sampler,
     requires,
-    retrieve_timesteps,
 )
 from .model import NextDiT
 from ...quant import quantize_model
@@ -518,9 +516,8 @@ class OneDiffusionPipeline(Pipelinelike):
                 / self.transformer.config.patch_size[-1]
                 / self.transformer.config.patch_size[-2]
             )
-        timesteps, steps = retrieve_timesteps(
-            self.sampler, steps, self.device, image_seq_len=image_seq_len
-        )
+
+        self.sampler.init_timesteps(steps, self.device, image_seq_len=image_seq_len)
 
         if image_settings.multiview:
             cond_indices_images, cond_indices_rays, cond_rays = (
@@ -537,7 +534,8 @@ class OneDiffusionPipeline(Pipelinelike):
             if cond_latents is not None:
                 latents[:, cond_indices] = cond_latents
 
-        for i, t in tqdm(enumerate(timesteps), total=steps):
+        # TODO: refactor this to use sampler.sample
+        for i, t in tqdm(enumerate(self.sampler.timesteps), total=steps):
             latent_model_input = torch.cat([latents] * 2) if do_cfg else latents
             if cond_latents is None and not image_settings.multiview:
                 timestep = torch.tensor(

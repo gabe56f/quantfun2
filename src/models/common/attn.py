@@ -5,7 +5,8 @@ import einops
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+
+# from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from ...kernels import rope_apply, topk_attn
 from ...misc.padding import _upad_input, pad_input

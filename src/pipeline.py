@@ -1,5 +1,4 @@
 from typing import Protocol, Optional, Tuple, List, Union, Dict, TypeVar, TYPE_CHECKING
-import inspect
 from pathlib import Path as _Path
 
 import torch
@@ -8,6 +7,7 @@ from PIL import Image
 from . import quant as q
 from .quant import qdtype, quantize_model, _nil
 from .misc.scheduling import Sampler, SAMPLERS
+from .misc.guidance import Guidance, CFGS
 
 if TYPE_CHECKING:
     from gguf import GGUFReader
@@ -134,18 +134,6 @@ class Postprocessor(Protocol):
     def __call__(self, images: Images, width: int, height: int) -> Images: ...
 
 
-class Guidance(Protocol):
-    def setup(self, steps: int, scale: float, disable: bool = False) -> "Guidance": ...
-
-    def __call__(
-        self,
-        x0: torch.Tensor,
-        conds: torch.Tensor,
-        timestep: torch.LongTensor,
-        step: int,
-    ) -> torch.Tensor: ...
-
-
 class Pipelinelike:
     models: Dict[str, torch.nn.Module]
 
@@ -154,7 +142,7 @@ class Pipelinelike:
     offload: bool
 
     sampler: Sampler
-    cfg: "Guidance"
+    cfg: Guidance
     postprocessors: Postprocessors
 
     def __init__(self) -> None:
@@ -177,8 +165,6 @@ class Pipelinelike:
         ]
         if __name == "cfg":
             if isinstance(__value, str):
-                from .misc.guidance import CFGS
-
                 value = __value.lower()
                 if value == "disable":
                     self.cfg.disable = True
@@ -493,14 +479,3 @@ def requires(load: str):
         return inner
 
     return decorator
-
-
-def retrieve_timesteps(
-    sampler: Sampler,
-    num_inference_steps: int,
-    device: Optional[torch.device] = None,
-    **kwargs,
-) -> Tuple[torch.Tensor, int]:
-    sampler.init_timesteps(num_inference_steps, device, **kwargs)
-
-    return sampler.timesteps, sampler.num_inference_steps

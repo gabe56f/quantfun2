@@ -123,14 +123,15 @@ with torch.inference_mode():
     # for i in range(1, 6):
     #     generate(f"test_{i}", "cfg", 4, i)
 
-    pipeline.sampler = "torchdiffeq"
+    pipeline.sampler = "ralston"
     pipeline.sampler.scheduler = "beta"
+    # pipeline.sampler.order = 4
 
     # for i in range(1, 6):
     #     generate(f"cb_{i}", "cfg", 4, i)
-    for i in range(1, 3):
-        generate(f"0b_{i}", "cfgzero", 4, i)
+    # for i in range(1, 3):
+    #     generate(f"0b_{i}", "cfgzero", 4, i)
     # for i in range(1, 6):
     #     generate(f"ab_{i}", "apg", 4, i)
-    # for i in range(1, 6):
-    #     generate(f"mb_{i}", "mahiro", 4, i)
+    for i in range(1, 6):
+        generate(f"mb_{i}", "mahiro", 5, i)

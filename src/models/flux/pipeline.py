@@ -1,11 +1,9 @@
 from typing import Union, Dict, List, Tuple
 from pathlib import Path as _Path
 
-import numpy as np
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
 from transformers import T5Tokenizer, T5EncoderModel
 import torch
-from tqdm.auto import tqdm
 from PIL import Image
 
 from .mmdit import FluxTransformer2D
@@ -19,7 +17,6 @@ from ...pipeline import (
     Prompts,
     Pseudorandom,
     requires,
-    retrieve_timesteps,
     Sampler,
 )
 from ...quant import quantize_model
@@ -289,7 +286,6 @@ class FluxPipeline(Pipelinelike):
             generator = seed
 
         height, width = size
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator=generator, eta=eta)
         encoder_hidden_states, encoder_attention_mask, do_cfg, batch_size = self.prompt(
             prompts, images_per_prompt
         )
@@ -306,11 +302,7 @@ class FluxPipeline(Pipelinelike):
             latents,
         )
 
-        timesteps, steps = retrieve_timesteps(
-            self.scheduler, steps, self.device, image_seq_len=latents.shape[1]
-        )
-
-        for i, t in tqdm(enumerate(timesteps), total=steps):
+        def sample(latents: torch.Tensor, i: int, t: torch.Tensor) -> torch.Tensor:
             latents_input = torch.cat([latents] * 2) if do_cfg else latents
             curr_t = t
             if not torch.is_tensor(curr_t):
@@ -328,11 +320,11 @@ class FluxPipeline(Pipelinelike):
                 cap_mask=encoder_attention_mask,
             )
 
-            noise_pred = self.cfg(latents_input, noise_pred, t, i)
-            noise_pred = -noise_pred
-            latents = self.scheduler.step(
-                noise_pred, t, latents, **extra_step_kwargs
-            ).prev_sample
+            return self.cfg(latents_input, noise_pred, t, i)
+
+        latents = self.sampler.sample(
+            sample, steps, self.device, image_seq_len=latents.shape[1]
+        )
 
         images = self.decode_image(latents, *size)
         images = self.postprocessors(images, *size)

@@ -3,7 +3,17 @@ from typing import Tuple
 
 import torch
 
-from ..pipeline import Guidance
+
+class Guidance:
+    def setup(self, steps: int, scale: float, disable: bool = False) -> "Guidance": ...
+
+    def __call__(
+        self,
+        x0: torch.Tensor,
+        conds: torch.Tensor,
+        timestep: torch.LongTensor,
+        step: int,
+    ) -> torch.Tensor: ...
 
 
 class CFG(Guidance):

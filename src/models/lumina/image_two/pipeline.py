@@ -1,11 +1,9 @@
 from typing import Union, Dict, List, Tuple
 from pathlib import Path as _Path
 
-import numpy as np
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler
 from transformers import Gemma2ForCausalLM, GemmaTokenizer
 import torch
-from tqdm.auto import tqdm
 from PIL import Image
 
 from .model import LuminaDiT
@@ -20,7 +18,6 @@ from ....pipeline import (
     Pseudorandom,
     Sampler,
     requires,
-    retrieve_timesteps,
 )
 from ....quant import quantize_model
 
@@ -154,7 +151,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
     @requires("text_encoder")
     def prompt(
         self, prompts: Prompts, images_per_prompt: int = 1
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.BoolTensor, bool, int]:
         device = self.device
 
         if isinstance(prompts, str):
@@ -318,11 +315,7 @@ class LuminaImageTwoPipeline(Pipelinelike):
             latents,
         )
 
-        timesteps, steps = retrieve_timesteps(
-            self.sampler, steps, self.device, image_seq_len=latents.shape[1]
-        )
-
-        for i, t in tqdm(enumerate(timesteps), total=steps):
+        def sample(latents: torch.Tensor, i: int, t: torch.Tensor) -> torch.Tensor:
             latents_input = torch.cat([latents] * 2) if do_cfg else latents
             curr_t = t
             if not torch.is_tensor(curr_t):
@@ -340,8 +333,11 @@ class LuminaImageTwoPipeline(Pipelinelike):
                 cap_mask=encoder_attention_mask,
             )
 
-            noise_pred = -self.cfg(latents_input, noise_pred, t, i)
-            latents = self.sampler.step(noise_pred, t, latents)
+            return -self.cfg(latents_input, noise_pred, t, i)
+
+        latents = self.sampler.sample(
+            latents, sample, steps, latents.device, latents.shape[1]
+        )
 
         images = self.decode_image(latents, *size)
         images = self.postprocessors(images, *size)
