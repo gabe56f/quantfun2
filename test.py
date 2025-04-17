@@ -123,7 +123,8 @@ with torch.inference_mode():
     # for i in range(1, 6):
     #     generate(f"test_{i}", "cfg", 4, i)
 
-    pipeline.sampler = "ralston"
+    # unipc doesnt work??
+    pipeline.sampler = "euler"
     pipeline.sampler.scheduler = "beta"
     # pipeline.sampler.order = 4
 

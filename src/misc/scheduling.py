@@ -1,4 +1,4 @@
-from typing import Callable, Union, Literal
+from typing import Callable, Union, Literal, List, Optional, Tuple
 import math
 
 import torch
@@ -457,10 +457,13 @@ class DiffusersFlowMatchEulerSampler(Sampler):
     def __init__(self) -> None:
         super().__init__()
 
-        from diffusers import FlowMatchEulerDiscreteScheduler
+        from diffusers import UniPCMultistepScheduler
 
-        self.sampler = FlowMatchEulerDiscreteScheduler(
-            shift=6.0, use_dynamic_shifting=False
+        self.sampler = UniPCMultistepScheduler(
+            flow_shift=6.0,
+            use_flow_sigmas=True,
+            prediction_type="flow_prediction",
+            solver_order=2,
         )
         self.num_train_timesteps = 1000
 
@@ -509,6 +512,7 @@ class FlowMatchNOrderSampler(FlowMatchEulerSampler):
         base_shift: float = 0.5,
         max_shift: float = 1.15,
         dtype: torch.dtype = torch.float32,
+        order: int = 2,
     ) -> None:
         super().__init__(
             num_train_timesteps,
@@ -519,14 +523,25 @@ class FlowMatchNOrderSampler(FlowMatchEulerSampler):
             dtype,
         )
 
-        self.order = 2
-        self.dt = None
-        self.x0 = None
-        self.derivative = None
+        self.order: int = order
+        self.stage: int = 0
+        # f_0 is x0, f_x is sampler output for order x
+        self.f: List[Optional[torch.Tensor]] = [None] * (order + 1)
+        # delta timestep (sigma in practice)
+        self.dt: torch.Tensor = None
+
+    def _step(self):
+        self._step_index += 1
+        self.stage = (self.stage + 1) % self.order
 
     def init_timesteps(
         self, num_inference_steps: int, device: torch.device, image_seq_len: int = None
     ):
+        # reset
+        self.stage = 0
+        self.f = [None] * (self.order + 1)
+        self.dt = None
+
         # approximate amount of steps
         num_inference_steps = num_inference_steps // self.order + 1
 
@@ -559,13 +574,8 @@ class FlowMatchHeunSampler(FlowMatchNOrderSampler):
             base_shift,
             max_shift,
             dtype,
+            order=2,
         )
-
-        self.order = 2
-
-        self.dt = None
-        self.x0 = None
-        self.derivative = None
 
     def step(
         self,
@@ -575,30 +585,24 @@ class FlowMatchHeunSampler(FlowMatchNOrderSampler):
     ) -> torch.Tensor:
         sample = sample.to(self.dtype)
 
-        if self.dt is None:
+        if self.stage == 0:
             sigma = self.sigmas[self._step_index]
-            sigma_next = self.sigmas[self._step_index + 1]
+            self.dt = self.sigmas[self._step_index + 1] - sigma
+            self.f[0] = sample
         else:
-            sigma = self.sigmas[self._step_index - 1]
-            sigma_next = self.sigmas[self._step_index]
+            sigma = self.sigmas[self._step_index]
 
-        if self.dt is None:
-            denoised = sample - model_output * sigma
-            self.x0 = sample
-            derivative = self.derivative = (sample - denoised) / sigma
-            dt = self.dt = sigma_next - sigma
-        else:
-            denoised = sample - model_output * sigma_next
-            derivative = (sample - denoised) / sigma_next
-            derivative = (self.derivative + derivative) / 2
-            dt = self.dt
-            sample = self.x0
+        denoised = sample - model_output * sigma
+        derivative = (sample - denoised) / sigma
+        self.f[self.stage + 1] = derivative
 
-            self.dt = None
-        prev_sample = sample + derivative * dt
+        if self.stage == 1:
+            derivative = (self.f[1] + self.f[2]) / 2
+
+        prev_sample = self.f[0] + derivative * self.dt
         prev_sample = prev_sample.to(model_output.dtype)
+        self._step()
 
-        self._step_index += 1
         return prev_sample
 
 
@@ -619,13 +623,10 @@ class FlowMatchRalstonSampler(FlowMatchNOrderSampler):
             base_shift,
             max_shift,
             dtype,
+            order=2,
         )
 
-        self.order = 2
-
         self.dt = None
-        self.x0 = None
-        self.derivative = None
 
     def step(
         self,
@@ -635,28 +636,30 @@ class FlowMatchRalstonSampler(FlowMatchNOrderSampler):
     ) -> torch.Tensor:
         sample = sample.to(self.dtype)
 
-        if self.x0 is None:
+        if self.stage == 0:
             sigma = self.sigmas[self._step_index]
             self.dt = self.sigmas[self._step_index + 1] - sigma
+            self.f[0] = sample
         else:
             sigma = self.sigmas[self._step_index]
 
         denoised = sample - model_output * sigma
         derivative = (sample - denoised) / sigma
-        if self.x0 is None:
-            prev_sample = sample + (2.0 / 3.0) * self.dt * derivative
-            self.derivative = derivative
-            self.x0 = sample
+        self.f[self.stage + 1] = derivative
+
+        if self.stage == 0:
+            prev_sample = sample + (2.0 / 3.0) * self.dt * self.f[1]
         else:
-            derivative_diff = 0.25 * self.derivative + 0.75 * derivative
-            prev_sample = self.x0 + self.dt * derivative_diff
-            self.x0 = None
+            derivative_diff = 0.25 * self.f[1] + 0.75 * self.f[2]
+            prev_sample = self.f[0] + self.dt * derivative_diff
 
         prev_sample = prev_sample.to(model_output.dtype)
-        self._step_index += 1
+        self._step()
+
         return prev_sample
 
 
+# actually ssprk3
 class FlowMatchRK3Sampler(FlowMatchNOrderSampler):
     def __init__(
         self,
@@ -674,22 +677,10 @@ class FlowMatchRK3Sampler(FlowMatchNOrderSampler):
             base_shift,
             max_shift,
             dtype,
+            order=3,
         )
 
-        self.order = 3
-
         self.dt = None
-        self.stage = 0
-
-        self.x0 = None
-        self.f0 = None
-        self.f1 = None
-
-    def init_timesteps(
-        self, num_inference_steps: int, device: torch.device, image_seq_len: int = None
-    ):
-        self.stage = 0
-        return super().init_timesteps(num_inference_steps, device, image_seq_len)
 
     def step(
         self,
@@ -699,25 +690,208 @@ class FlowMatchRK3Sampler(FlowMatchNOrderSampler):
     ) -> torch.Tensor:
         sample = sample.to(self.dtype)
 
+        self.f[self.stage + 1] = model_output
         if self.stage == 0:
             self.dt = self.sigmas[self._step_index + 1] - self.sigmas[self._step_index]
-            self.f0 = model_output
-            self.x0 = sample
+            self.f[0] = sample
 
-            prev_sample = self.x0 + self.dt * self.f0
+            prev_sample = self.f[0] + self.dt * self.f[1]
         elif self.stage == 1:
-            self.f1 = model_output
             fourth_dt = 0.25 * self.dt
-
-            prev_sample = self.x0 + fourth_dt * (self.f0 + self.f1)
+            prev_sample = self.f[0] + fourth_dt * (self.f[1] + self.f[2])
         else:
             sixth_dt = (1 / 6) * self.dt
-
-            prev_sample = self.x0 + sixth_dt * (self.f0 + self.f1 + 4 * model_output)
+            prev_sample = self.f[0] + sixth_dt * (self.f[1] + self.f[2] + 4 * self.f[3])
         prev_sample = prev_sample.to(model_output.dtype)
-        self._step_index += 1
-        self.stage = (self.stage + 1) % 3
+        self._step()
+
         return prev_sample
+
+
+# TODO: fix?
+class FlowMatchUniPCSampler(FlowMatchEulerSampler):
+    def __init__(
+        self,
+        num_train_timesteps: int = 1000,
+        shift: float = 3.0,
+        use_dynamic_shifting: bool = True,
+        base_shift: float = 0.5,
+        max_shift: float = 1.15,
+        solver_type: Literal["bh1", "bh2", "vary"] = "bh2",
+        solver_order: int = 2,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        super().__init__(
+            num_train_timesteps,
+            shift,
+            use_dynamic_shifting,
+            base_shift,
+            max_shift,
+            dtype,
+        )
+
+        self.order = solver_order
+        self.solver_type: str = solver_type
+        self.last_sample: torch.Tensor = None
+        self.lower_order_nums: int = 0
+        self.lower_order_final: bool = True
+
+    def init_timesteps(
+        self, num_inference_steps: int, device: torch.device, image_seq_len: int = None
+    ):
+        self.last_sample = None
+        self.lower_order_nums = 0
+        self.f = [None] * self.order
+
+        self.dt = None
+        return super().init_timesteps(num_inference_steps, device, image_seq_len)
+
+    def _normalize(self, device: torch.device, predictor: bool = False) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        torch.Tensor,
+    ]:
+        if predictor:
+            sigma_t = self.sigmas[self._step_index + 1]
+            sigma_s0 = self.sigmas[self._step_index]
+        else:
+            sigma_t = self.sigmas[self._step_index]
+            sigma_s0 = self.sigmas[self._step_index - 1]
+
+        lambda_t = torch.log((1 - sigma_t) / sigma_t)
+        lambda_s0 = torch.log((1 - sigma_s0) / sigma_s0)
+
+        h = lambda_t - lambda_s0
+        rks = []
+        D1s = []
+        for i in range(1, self.this_order):
+            if predictor:
+                si = self._step_index + i
+            else:
+                si = self._step_index - (i + 1)
+            mi = self.f[-(i + 1)]
+
+            sigma_si = self.sigmas[si]
+            lambda_si = torch.log((1 - sigma_si) / sigma_si)
+
+            rk = (lambda_si - lambda_s0) / h
+
+            rks.append(rk)
+            D1s.append((mi - self.f[-1]) / rk)
+
+        rks.append(1.0)
+        rks = torch.tensor(rks, device=device)
+
+        R = []
+        b = []
+        hh = -h
+        h_phi_1 = torch.expm1(hh)
+        h_phi_k = h_phi_1 / hh - 1
+
+        factorial_i = 1
+        if self.solver_type == "bh1":
+            B_h = hh
+        elif self.solver_type == "bh2":
+            B_h = torch.expm1(hh)
+
+        for i in range(1, self.this_order + 1):
+            R.append(torch.pow(rks, i - 1))
+            b.append(h_phi_k * factorial_i / B_h)
+            factorial_i *= i + 1
+            h_phi_k = h_phi_k / hh - 1 / factorial_i
+        R = torch.stack(R)
+        b = torch.tensor(b, device=device)
+        if len(D1s) > 0:
+            D1s = torch.stack(D1s, dim=1)
+        else:
+            D1s = None
+        return R, b, sigma_t, sigma_s0, h_phi_1, D1s, B_h
+
+    def _corrector(
+        self,
+        model_output: torch.Tensor,
+        last_sample: torch.Tensor,
+        sample: torch.Tensor,
+    ) -> torch.Tensor:
+        R, b, sigma_t, sigma_s0, h_phi_1, D1s, B_h = self._normalize(sample.device)
+
+        if self.this_order == 1:
+            rhos_c = torch.tensor([0.5], dtype=sample.dtype, device=sample.device)
+        else:
+            rhos_c = torch.linalg.solve(R, b).to(sample.device).to(sample.dtype)
+
+        x_t_ = sigma_t / sigma_s0 * last_sample - (1 - sigma_t) * h_phi_1 * self.f[-1]
+        if D1s is not None:
+            corr_res = torch.einsum("k,bkc...->bc...", rhos_c[:-1], D1s)
+        else:
+            corr_res = 0
+        D1_t = model_output - self.f[-1]
+
+        sample = x_t_ - (1 - sigma_t) * B_h * (corr_res + rhos_c[-1] * D1_t)
+        return sample
+
+    def _predictor(self, sample: torch.Tensor) -> torch.Tensor:
+        R, b, sigma_t, sigma_s0, h_phi_1, D1s, B_h = self._normalize(
+            sample.device, True
+        )
+        x_t_ = sigma_t / sigma_s0 * sample - (1 - sigma_t) * h_phi_1 * self.f[-1]
+        if D1s is not None:
+            if self.this_order == 2:
+                rhos_p = torch.tensor([0.5], dtype=sample.dtype, device=sample.device)
+            else:
+                rhos_p = (
+                    torch.linalg.solve(R[:-1, :-1], b[:-1])
+                    .to(sample.device)
+                    .to(sample.dtype)
+                )
+            pred_res = torch.einsum("k,bkc...->bc...", rhos_p, D1s)
+        else:
+            pred_res = 0
+        sample = x_t_ - (1 - sigma_t) * B_h * pred_res
+        return sample
+
+    def step(
+        self,
+        model_output: torch.Tensor,
+        timestep: float | torch.Tensor,
+        sample: torch.Tensor,
+    ) -> torch.Tensor:
+        output_dtype = model_output.dtype
+        sample = sample.to(self.dtype)
+        model_output = model_output.to(self.dtype)
+
+        sigma_t = self.sigmas[self._step_index]
+        model_output = sample - sigma_t * model_output
+
+        if self.last_sample is not None:
+            sample = self._corrector(
+                model_output,
+                self.last_sample,
+                sample,
+            )
+
+        for i in range(self.order - 1):
+            self.f[i] = self.f[i + 1]
+        self.f[-1] = model_output
+
+        self.this_order = min(
+            self.order,
+            len(self.timesteps) - self._step_index,
+            self.lower_order_nums + 1,
+        )
+
+        self.last_sample = sample
+        prev_sample = self._predictor(sample)
+
+        if self.lower_order_nums < self.order:
+            self.lower_order_nums += 1
+        self._step_index += 1
+
+        return prev_sample.to(output_dtype)
 
 
 SAMPLERS = {
@@ -728,4 +902,5 @@ SAMPLERS = {
     "heun": FlowMatchHeunSampler,
     "ralston": FlowMatchRalstonSampler,
     "rk3": FlowMatchRK3Sampler,
+    "unipc": FlowMatchUniPCSampler,
 }
